@@ -1,6 +1,11 @@
+/**
+ * Signup Page Component
+ * Premium Design - Fully Responsive
+ */
+
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Lock, Mail, User, Eye, EyeOff, Loader2, ShieldCheck, ChevronRight, Globe } from 'lucide-react';
+import { Lock, Mail, User, Eye, EyeOff, Loader2, ShieldCheck, ChevronRight } from 'lucide-react';
 import API from '../api/axios';
 
 const Signup = () => {
@@ -15,89 +20,159 @@ const Signup = () => {
     setLoading(true);
     setError('');
 
+    // Validation
+    if (!formData.name.trim()) {
+      setError('Name is required');
+      setLoading(false);
+      return;
+    }
+
+    if (!formData.email.trim()) {
+      setError('Email is required');
+      setLoading(false);
+      return;
+    }
+
+    if (formData.password.length < 6) {
+      setError('Password must be at least 6 characters');
+      setLoading(false);
+      return;
+    }
+
     try {
       await API.post('/auth/signup', formData);
-      navigate('/login');
+      
+      // Auto-login after signup
+      try {
+        const loginRes = await API.post('/auth/login', { 
+          email: formData.email, 
+          password: formData.password 
+        });
+        localStorage.setItem('token', loginRes.data.token);
+        localStorage.setItem('user', JSON.stringify(loginRes.data.user));
+        window.dispatchEvent(new Event('loginStateChange'));
+        navigate('/pos');
+      } catch (loginErr) {
+        navigate('/login');
+      }
     } catch (err) {
-      setError(err.response?.data?.error || "Registration failed. Please check your credentials.");
+      setError(err.response?.data?.error || "Registration failed. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
+  const handleInputChange = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+    if (error) setError('');
+  };
+
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-[#020617] font-sans relative overflow-hidden p-6 selection:bg-indigo-500/30">
+    <div className="min-h-screen flex items-center justify-center bg-gray-900 p-4 relative overflow-hidden">
       
-      {/* --- AMBIENT LIGHTING (Luxury Depth) --- */}
-      <div className="absolute top-[-10%] right-[-10%] w-[500px] h-[500px] bg-indigo-500/10 blur-[120px] rounded-full" />
-      <div className="absolute bottom-[-10%] left-[-10%] w-[400px] h-[400px] bg-slate-500/5 blur-[100px] rounded-full" />
+      {/* Background Decorations */}
+      <div className="absolute top-0 right-0 w-96 h-96 bg-blue-500/10 blur-3xl rounded-full" />
+      <div className="absolute bottom-0 left-0 w-80 h-80 bg-gray-500/5 blur-3xl rounded-full" />
       
-      <div className="relative z-10 w-full max-w-[480px] animate-in fade-in slide-in-from-bottom-4 duration-700">
+      <div className="relative z-10 w-full max-w-md space-y-6 md:space-y-8">
         
-        {/* --- BRANDING HEADER --- */}
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-white/5 border border-white/10 shadow-2xl mb-6 group hover:border-indigo-500/50 transition-colors duration-500">
-            <Globe className="text-indigo-400 group-hover:rotate-12 transition-transform duration-500" size={32} />
+        {/* Header */}
+        <div className="text-center">
+          <div className="inline-flex items-center justify-center w-14 h-14 md:w-16 md:h-16 
+                          rounded-2xl bg-blue-600 shadow-lg mb-4 md:mb-6 
+                          hover:rotate-6 transition-transform duration-300">
+            <ShieldCheck className="text-white" size={28} />
           </div>
-          <h1 className="text-4xl font-bold text-white tracking-tight">
-            Create <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-slate-200 font-serif italic">Executive</span> Account
+          <h1 className="text-3xl md:text-4xl font-bold text-white mb-2">
+            Create Your Account
           </h1>
-          <p className="text-slate-400 text-sm mt-3 font-medium tracking-wide">Enter your professional credentials to begin</p>
+          <p className="text-gray-400 text-sm md:text-base">
+            Join EthioPOS and start managing your business
+          </p>
         </div>
 
-        {/* --- MAIN FORM CONTAINER (Glassmorphism) --- */}
-        <div className="bg-slate-900/40 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] p-8 md:p-12 shadow-[0_40px_100px_-20px_rgba(0,0,0,0.7)] ring-1 ring-white/5">
+        {/* Form Container */}
+        <div className="bg-gray-800/80 backdrop-blur-xl border border-gray-700 
+                        p-6 md:p-8 rounded-2xl shadow-2xl">
           
-          <form onSubmit={handleSignup} className="space-y-6">
+          <form onSubmit={handleSignup} className="space-y-4">
+            
+            {/* Error Message */}
             {error && (
-              <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl text-rose-400 text-xs font-semibold text-center animate-shake">
+              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl 
+                              text-red-400 text-sm text-center font-medium animate-shake">
                 {error}
               </div>
             )}
 
-            {/* Full Name Field */}
-            <div className="space-y-2.5">
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] ml-1">Full Name</label>
-              <div className="relative group">
-                <User size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
+            {/* Full Name */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Full Name
+              </label>
+              <div className="relative">
+                <User className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" 
+                      size={18} />
                 <input 
+                  type="text"
                   required 
-                  className="w-full bg-slate-950/40 border border-slate-800 p-4 pl-12 rounded-2xl text-slate-100 placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/50 transition-all duration-300"
-                  placeholder="Full name as it appears on ID"
-                  onChange={(e) => setFormData({...formData, name: e.target.value})}
+                  placeholder="Enter your full name"
+                  value={formData.name}
+                  className="w-full bg-gray-900 border border-gray-700 px-3 py-2 pl-10 
+                             rounded-xl text-white placeholder-gray-500 
+                             focus:outline-none focus:ring-2 focus:ring-blue-500 
+                             focus:border-transparent transition duration-200"
+                  onChange={(e) => handleInputChange('name', e.target.value)}
                 />
               </div>
             </div>
 
-            {/* Email Field */}
-            <div className="space-y-2.5">
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] ml-1">Work Email Address</label>
-              <div className="relative group">
-                <Mail size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
+            {/* Email */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Email Address
+              </label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" 
+                      size={18} />
                 <input 
-                  type="email" required 
-                  className="w-full bg-slate-950/40 border border-slate-800 p-4 pl-12 rounded-2xl text-slate-100 placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/50 transition-all duration-300"
-                  placeholder="name@organization.com"
-                  onChange={(e) => setFormData({...formData, email: e.target.value})}
+                  type="email" 
+                  required 
+                  placeholder="name@example.com"
+                  value={formData.email}
+                  className="w-full bg-gray-900 border border-gray-700 px-3 py-2 pl-10 
+                             rounded-xl text-white placeholder-gray-500 
+                             focus:outline-none focus:ring-2 focus:ring-blue-500 
+                             focus:border-transparent transition duration-200"
+                  onChange={(e) => handleInputChange('email', e.target.value)}
                 />
               </div>
             </div>
 
-            {/* Password Field */}
-            <div className="space-y-2.5">
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] ml-1">Security Access Pin</label>
-              <div className="relative group">
-                <Lock size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
+            {/* Password */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Password
+              </label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" 
+                      size={18} />
                 <input 
-                  type={showPassword ? "text" : "password"} required 
-                  className="w-full bg-slate-950/40 border border-slate-800 p-4 pl-12 pr-12 rounded-2xl text-slate-100 placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/50 transition-all duration-300"
-                  placeholder="Minimum 8 characters"
-                  onChange={(e) => setFormData({...formData, password: e.target.value})}
+                  type={showPassword ? "text" : "password"} 
+                  required 
+                  placeholder="Minimum 6 characters"
+                  value={formData.password}
+                  className="w-full bg-gray-900 border border-gray-700 px-3 py-2 pl-10 pr-10 
+                             rounded-xl text-white placeholder-gray-500 
+                             focus:outline-none focus:ring-2 focus:ring-blue-500 
+                             focus:border-transparent transition duration-200"
+                  onChange={(e) => handleInputChange('password', e.target.value)}
                 />
                 <button 
                   type="button" 
                   onClick={() => setShowPassword(!showPassword)} 
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 hover:text-indigo-400 transition-colors"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 
+                             hover:text-gray-300 transition duration-200"
                 >
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
@@ -106,37 +181,53 @@ const Signup = () => {
 
             {/* Submit Button */}
             <button 
+              type="submit"
               disabled={loading} 
-              className="group w-full relative overflow-hidden bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl text-white font-bold text-base transition-all duration-300 active:scale-[0.98] shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-3"
+              className="w-full bg-blue-600 hover:bg-blue-700 px-4 py-3 rounded-xl 
+                         text-white font-semibold transition-all duration-200 
+                         flex items-center justify-center gap-2 shadow-sm 
+                         active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed 
+                         group"
             >
-              <div className="absolute inset-0 w-full h-full bg-gradient-to-r from-white/0 via-white/10 to-white/0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
               {loading ? (
-                <Loader2 className="animate-spin" size={20} />
+                <>
+                  <Loader2 className="animate-spin" size={20} />
+                  Creating Account...
+                </>
               ) : (
                 <>
-                  <span>Initialize System Access</span>
-                  <ChevronRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                  <span>Create Account</span>
+                  <ChevronRight size={18} 
+                                className="group-hover:translate-x-1 transition-transform" />
                 </>
               )}
             </button>
           </form>
 
-          {/* Footer Navigation */}
-          <div className="mt-10 pt-8 border-t border-white/5 flex flex-col items-center gap-4">
-            <p className="text-slate-500 text-sm font-medium">
-              Existing administrator? <Link to="/login" className="text-indigo-400 font-bold hover:text-indigo-300 transition-colors underline-offset-4 hover:underline">Sign In</Link>
+          {/* Footer */}
+          <div className="mt-6 pt-6 border-t border-gray-700 space-y-4">
+            <p className="text-center text-gray-400 text-sm">
+              Already have an account?{' '}
+              <Link 
+                to="/login" 
+                className="text-blue-400 hover:text-blue-300 transition duration-200 
+                           font-semibold"
+              >
+                Sign In
+              </Link>
             </p>
             
-            <div className="flex items-center gap-2 text-slate-600 bg-white/5 px-4 py-1.5 rounded-full border border-white/5">
-              <ShieldCheck size={14} className="text-emerald-500" />
-              <span className="text-[10px] font-bold uppercase tracking-widest">Secure 256-bit Encrypted Setup</span>
+            <div className="flex items-center justify-center gap-2 text-gray-500 
+                            bg-gray-900/50 px-3 py-2 rounded-xl border border-gray-700/50">
+              <ShieldCheck size={14} className="text-green-500" />
+              <span className="text-xs font-medium">256-bit Encrypted</span>
             </div>
           </div>
         </div>
         
-        {/* Subtle Bottom Footer */}
-        <p className="text-center mt-8 text-slate-600 text-xs font-medium tracking-wide">
-          © 2026 EthioPOS Systems. All Rights Reserved.
+        {/* Copyright */}
+        <p className="text-center text-gray-600 text-xs">
+          © 2024 EthioPOS. All Rights Reserved.
         </p>
       </div>
     </div>

@@ -1,6 +1,6 @@
 /**
  * Staff Management Component
- * Manage team members and permissions
+ * Fully responsive with consistent design system
  */
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
@@ -8,7 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import API from '../api/axios';
 import { 
   Users, UserPlus, Shield, Mail, Trash2, Loader2, 
-  Award, Search, XCircle, ChevronRight, X, Edit2, CheckCircle
+  Award, Search, X, Edit2, CheckCircle, AlertCircle
 } from 'lucide-react';
 
 const Staff = () => {
@@ -67,13 +67,13 @@ const Staff = () => {
         navigate('/login');
         return;
       }
-      // Try cached data
       try {
         const cached = JSON.parse(localStorage.getItem('ultra_staff_directory'));
         if (cached) setStaff(cached);
       } catch (e) {
         console.error('Cache error:', e);
       }
+      showNotification('Failed to load staff data', 'error');
     } finally { 
       setLoading(false); 
     }
@@ -182,7 +182,6 @@ const Staff = () => {
         status: formData.status
       };
 
-      // Include password only if changed
       if (formData.password && formData.password.length >= 6) {
         payload.password = formData.password;
       }
@@ -225,54 +224,77 @@ const Staff = () => {
     }
   };
 
-  // Check if current user is admin/owner
+  // Check permissions
   const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'owner';
   const isOwner = currentUser?.role === 'owner';
 
   return (
-    <div className="min-h-full bg-[#FDFDFE] p-6 md:p-10 lg:p-16 font-sans text-slate-900">
+    <div className="min-h-full bg-gray-50 p-4 md:p-6 lg:p-8">
       <div className="max-w-7xl mx-auto">
         
         {/* Notification Toast */}
         {notification && (
-          <div className={`fixed top-6 right-6 z-[70] px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-slideIn ${
+          <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-lg 
+                          flex items-center gap-2 animate-slideIn ${
             notification.type === 'success' 
-              ? 'bg-emerald-500 text-white' 
+              ? 'bg-green-500 text-white' 
               : 'bg-red-500 text-white'
           }`}>
-            {notification.type === 'success' ? <CheckCircle size={20} /> : <XCircle size={20} />}
-            <span className="font-semibold">{notification.message}</span>
+            {notification.type === 'success' ? 
+              <CheckCircle size={18} /> : 
+              <AlertCircle size={18} />
+            }
+            <span className="font-medium text-sm">{notification.message}</span>
           </div>
         )}
 
         {/* Header */}
-        <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end mb-12 gap-6">
+        <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 md:mb-8 gap-4">
           <div>
-            <div className="flex items-center gap-2 mb-3">
-              <div className="h-1 w-12 bg-indigo-600 rounded-full" />
-              <span className="text-xs font-bold tracking-[0.3em] uppercase text-indigo-600/80">Human Capital</span>
+            <div className="flex items-center gap-2 text-blue-600 mb-1">
+              <div className="h-1 w-8 bg-blue-600 rounded-full" />
+              <span className="text-xs font-semibold uppercase tracking-wider">
+                Human Capital
+              </span>
             </div>
-            <h1 className="text-3xl md:text-4xl font-semibold tracking-tight text-slate-900">
-              Staff <span className="font-light text-slate-400">Directory</span>
+            <h1 className="text-2xl md:text-3xl font-bold text-gray-900">
+              Staff Directory
             </h1>
-            <p className="text-slate-500 mt-2 font-medium">Manage team members and access permissions</p>
+            <p className="text-gray-600 text-sm md:text-base mt-1">
+              Manage team members and access permissions
+            </p>
           </div>
           
-          <div className="flex flex-col sm:flex-row w-full lg:w-auto gap-4">
-            <div className="relative">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <div className="flex flex-col sm:flex-row w-full md:w-auto gap-3">
+            <div className="relative flex-1 sm:flex-none">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" 
+                      size={18} />
               <input 
                 type="text" 
                 placeholder="Search team..."
                 value={searchTerm}
-                className="w-full sm:w-64 pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm font-medium transition-colors"
+                className="w-full sm:w-64 pl-10 pr-10 py-2 bg-white border border-gray-300 
+                           rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 
+                           text-sm transition duration-200"
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
+              {searchTerm && (
+                <button 
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 
+                             hover:text-gray-600"
+                >
+                  <X size={16} />
+                </button>
+              )}
             </div>
             {isAdmin && (
               <button 
                 onClick={openAddModal}
-                className="bg-slate-900 hover:bg-indigo-600 text-white px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2 shadow-lg active:scale-95 transition-all"
+                className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white 
+                           px-4 py-2 rounded-xl font-semibold flex items-center 
+                           justify-center gap-2 shadow-sm transition duration-200 
+                           active:scale-95"
               >
                 <UserPlus size={18} /> Add Member
               </button>
@@ -281,27 +303,42 @@ const Staff = () => {
         </header>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
-          <StatCard label="Total Staff" value={totalStaff} icon={<Users size={20}/>} color="indigo" />
-          <StatCard label="Admins" value={adminCount} icon={<Shield size={20}/>} color="amber" />
-          <StatCard label="Active" value={activeCount} icon={<Award size={20}/>} color="emerald" />
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <StatCard 
+            label="Total Staff" 
+            value={totalStaff} 
+            icon={<Users size={20}/>} 
+            color="blue" 
+          />
+          <StatCard 
+            label="Admins" 
+            value={adminCount} 
+            icon={<Shield size={20}/>} 
+            color="yellow" 
+          />
+          <StatCard 
+            label="Active" 
+            value={activeCount} 
+            icon={<Award size={20}/>} 
+            color="green" 
+          />
         </div>
 
         {/* Staff Grid */}
         {loading ? (
-          <div className="py-20 flex flex-col items-center gap-4">
-            <Loader2 className="animate-spin text-indigo-600" size={40} />
-            <span className="text-sm font-medium text-slate-400">Loading team data...</span>
+          <div className="py-16 md:py-20 flex flex-col items-center gap-3">
+            <Loader2 className="animate-spin text-blue-600" size={36} />
+            <span className="text-sm font-medium text-gray-500">Loading team data...</span>
           </div>
         ) : filteredStaff.length === 0 ? (
-          <div className="py-20 flex flex-col items-center gap-4 text-slate-300">
-            <Users size={64} strokeWidth={1} />
-            <p className="font-medium">
+          <div className="py-16 md:py-20 flex flex-col items-center gap-3 text-gray-400">
+            <Users size={48} strokeWidth={1.5} />
+            <p className="font-medium text-sm">
               {searchTerm ? 'No staff members match your search' : 'No staff members found'}
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
             {filteredStaff.map((person) => (
               <StaffCard 
                 key={person.id} 
@@ -326,6 +363,7 @@ const Staff = () => {
               value={formData.name}
               onChange={(val) => setFormData({...formData, name: val})}
               required
+              placeholder="Enter full name"
             />
             <FormInput 
               label="Email Address" 
@@ -333,6 +371,7 @@ const Staff = () => {
               value={formData.email}
               onChange={(val) => setFormData({...formData, email: val})}
               required
+              placeholder="email@example.com"
             />
             <FormInput 
               label="Password" 
@@ -370,6 +409,7 @@ const Staff = () => {
               value={formData.name}
               onChange={(val) => setFormData({...formData, name: val})}
               required
+              placeholder="Enter full name"
             />
             <FormInput 
               label="Email Address" 
@@ -377,6 +417,7 @@ const Staff = () => {
               value={formData.email}
               onChange={(val) => setFormData({...formData, email: val})}
               required
+              placeholder="email@example.com"
             />
             <FormInput 
               label="New Password (optional)" 
@@ -427,64 +468,82 @@ const StaffCard = ({ person, currentUser, isAdmin, isOwner, onEdit, onDelete }) 
   const canDelete = isOwner && !isCurrentUser && person.role !== 'owner';
 
   const roleColors = {
-    owner: 'bg-amber-50 text-amber-600 border-amber-100',
-    admin: 'bg-indigo-50 text-indigo-600 border-indigo-100',
-    staff: 'bg-slate-50 text-slate-500 border-slate-100'
+    owner: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+    admin: 'bg-blue-100 text-blue-700 border-blue-200',
+    staff: 'bg-gray-100 text-gray-700 border-gray-200'
   };
 
   const avatarColors = {
-    owner: 'bg-amber-500',
-    admin: 'bg-indigo-600',
-    staff: 'bg-slate-400'
+    owner: 'bg-yellow-500',
+    admin: 'bg-blue-600',
+    staff: 'bg-gray-500'
   };
 
   return (
-    <div className={`bg-white rounded-2xl p-6 border shadow-sm hover:shadow-md transition-all group ${
-      person.status === 'inactive' ? 'opacity-60 border-red-200' : 'border-slate-100'
+    <div className={`bg-white rounded-2xl p-4 md:p-6 border shadow-sm 
+                     hover:shadow-md transition-all duration-200 group ${
+      person.status === 'inactive' 
+        ? 'opacity-60 border-red-200' 
+        : 'border-gray-100 hover:border-blue-200'
     }`}>
+      
       {/* Header */}
       <div className="flex justify-between items-start mb-4">
-        <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg ${avatarColors[person.role] || avatarColors.staff}`}>
+        <div className={`w-12 h-12 rounded-xl flex items-center justify-center 
+                         text-white font-bold text-lg shadow-sm ${
+          avatarColors[person.role] || avatarColors.staff
+        }`}>
           {person.name?.charAt(0)?.toUpperCase() || 'U'}
         </div>
         
         {/* Actions */}
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          {canEdit && (
-            <button 
-              onClick={onEdit}
-              className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-              title="Edit"
-            >
-              <Edit2 size={16} />
-            </button>
-          )}
-          {canDelete && (
-            <button 
-              onClick={onDelete}
-              className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-              title="Delete"
-            >
-              <Trash2 size={16} />
-            </button>
-          )}
-        </div>
+        {(canEdit || canDelete) && (
+          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            {canEdit && (
+              <button 
+                onClick={onEdit}
+                className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 
+                           rounded-xl transition-all duration-200"
+                title="Edit"
+              >
+                <Edit2 size={16} />
+              </button>
+            )}
+            {canDelete && (
+              <button 
+                onClick={onDelete}
+                className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 
+                           rounded-xl transition-all duration-200"
+                title="Delete"
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Info */}
       <div className="mb-4">
-        <div className="flex items-center gap-2">
-          <h3 className="text-lg font-semibold text-slate-900 truncate">{person.name}</h3>
+        <div className="flex items-center gap-2 mb-2">
+          <h3 className="text-base md:text-lg font-semibold text-gray-900 truncate">
+            {person.name}
+          </h3>
           {isCurrentUser && (
-            <span className="text-[9px] bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded font-bold">You</span>
+            <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full 
+                             font-semibold">
+              You
+            </span>
           )}
         </div>
-        <div className="flex items-center gap-2 mt-2">
-          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${roleColors[person.role] || roleColors.staff}`}>
+        <div className="flex flex-wrap gap-2">
+          <span className={`px-2.5 py-1 rounded-lg text-xs font-semibold uppercase 
+                            border ${roleColors[person.role] || roleColors.staff}`}>
             {person.role}
           </span>
           {person.status === 'inactive' && (
-            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-red-50 text-red-500 border border-red-100">
+            <span className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase 
+                             bg-red-100 text-red-600 border border-red-200">
               Inactive
             </span>
           )}
@@ -492,9 +551,9 @@ const StaffCard = ({ person, currentUser, isAdmin, isOwner, onEdit, onDelete }) 
       </div>
 
       {/* Email */}
-      <div className="pt-4 border-t border-slate-100 flex items-center gap-2 text-slate-500">
-        <Mail size={14} />
-        <span className="text-xs font-medium truncate">{person.email}</span>
+      <div className="pt-4 border-t border-gray-100 flex items-center gap-2 text-gray-600">
+        <Mail size={14} className="flex-shrink-0" />
+        <span className="text-xs md:text-sm font-medium truncate">{person.email}</span>
       </div>
     </div>
   );
@@ -504,18 +563,23 @@ const StaffCard = ({ person, currentUser, isAdmin, isOwner, onEdit, onDelete }) 
  * Stat Card Component
  */
 const StatCard = ({ label, value, icon, color }) => {
-  const colors = {
-    indigo: "bg-indigo-50 text-indigo-600",
-    amber: "bg-amber-50 text-amber-600",
-    emerald: "bg-emerald-50 text-emerald-600"
+  const colorClasses = {
+    blue: "bg-blue-50 text-blue-600",
+    yellow: "bg-yellow-50 text-yellow-600",
+    green: "bg-green-50 text-green-600"
   };
 
   return (
-    <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-4">
-      <div className={`p-3 rounded-xl ${colors[color]}`}>{icon}</div>
+    <div className="bg-white p-4 md:p-6 rounded-2xl border border-gray-100 shadow-sm 
+                    flex items-center gap-3 md:gap-4">
+      <div className={`p-2.5 md:p-3 rounded-xl ${colorClasses[color]}`}>
+        {icon}
+      </div>
       <div>
-        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">{label}</p>
-        <p className="text-2xl font-bold text-slate-900">{value}</p>
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+          {label}
+        </p>
+        <p className="text-xl md:text-2xl font-bold text-gray-900">{value}</p>
       </div>
     </div>
   );
@@ -525,18 +589,20 @@ const StatCard = ({ label, value, icon, color }) => {
  * Modal Component
  */
 const Modal = ({ title, children, onClose }) => (
-  <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[60] p-6">
-    <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl animate-slideIn">
-      <div className="flex justify-between items-center p-6 border-b border-slate-100">
-        <h2 className="text-xl font-bold text-slate-900">{title}</h2>
+  <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center 
+                  justify-center z-50 p-4">
+    <div className="bg-white w-full max-w-md rounded-2xl shadow-xl animate-slideIn">
+      <div className="flex justify-between items-center p-4 md:p-6 border-b border-gray-100">
+        <h2 className="text-lg md:text-xl font-bold text-gray-900">{title}</h2>
         <button 
           onClick={onClose}
-          className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+          className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 
+                     rounded-xl transition-all duration-200"
         >
           <X size={20} />
         </button>
       </div>
-      <div className="p-6">
+      <div className="p-4 md:p-6">
         {children}
       </div>
     </div>
@@ -547,8 +613,10 @@ const Modal = ({ title, children, onClose }) => (
  * Form Input Component
  */
 const FormInput = ({ label, type = 'text', value, onChange, placeholder, required, disabled }) => (
-  <div className="space-y-1.5">
-    <label className="text-xs font-bold uppercase text-slate-400 tracking-wider">{label}</label>
+  <div>
+    <label className="block text-sm font-medium text-gray-700 mb-1">
+      {label}
+    </label>
     <input 
       type={type}
       required={required}
@@ -556,7 +624,10 @@ const FormInput = ({ label, type = 'text', value, onChange, placeholder, require
       placeholder={placeholder}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-indigo-500 focus:bg-white transition-all font-medium disabled:opacity-50"
+      className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl 
+                 focus:outline-none focus:ring-2 focus:ring-blue-500 
+                 focus:border-transparent transition duration-200 
+                 disabled:opacity-50 disabled:cursor-not-allowed"
     />
   </div>
 );
@@ -565,13 +636,18 @@ const FormInput = ({ label, type = 'text', value, onChange, placeholder, require
  * Form Select Component
  */
 const FormSelect = ({ label, value, onChange, options, disabled }) => (
-  <div className="space-y-1.5">
-    <label className="text-xs font-bold uppercase text-slate-400 tracking-wider">{label}</label>
+  <div>
+    <label className="block text-sm font-medium text-gray-700 mb-1">
+      {label}
+    </label>
     <select 
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
-      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-indigo-500 focus:bg-white transition-all font-medium disabled:opacity-50"
+      className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl 
+                 focus:outline-none focus:ring-2 focus:ring-blue-500 
+                 focus:border-transparent transition duration-200 
+                 disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {options.map(opt => (
         <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -584,20 +660,32 @@ const FormSelect = ({ label, value, onChange, options, disabled }) => (
  * Modal Actions Component
  */
 const ModalActions = ({ onCancel, saving, submitLabel }) => (
-  <div className="flex gap-4 pt-4">
+  <div className="flex flex-col sm:flex-row gap-3 pt-4">
     <button 
       type="button" 
       onClick={onCancel}
-      className="flex-1 py-3 text-slate-500 font-semibold hover:bg-slate-50 rounded-xl transition-colors"
+      className="w-full sm:w-auto px-4 py-2 text-gray-700 font-medium 
+                 bg-gray-200 hover:bg-gray-300 rounded-xl 
+                 transition duration-200 active:scale-95"
     >
       Cancel
     </button>
     <button 
       type="submit" 
       disabled={saving}
-      className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+      className="w-full sm:flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 
+                 text-white rounded-xl font-semibold shadow-sm 
+                 transition duration-200 flex items-center justify-center gap-2 
+                 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
     >
-      {saving ? <Loader2 className="animate-spin" size={18} /> : submitLabel}
+      {saving ? (
+        <>
+          <Loader2 className="animate-spin" size={18} />
+          Saving...
+        </>
+      ) : (
+        submitLabel
+      )}
     </button>
   </div>
 );
