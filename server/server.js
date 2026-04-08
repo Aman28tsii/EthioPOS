@@ -2464,8 +2464,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // ═══════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════
-
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
@@ -2479,7 +2478,7 @@ const server = app.listen(PORT, () => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
   console.log(`   🚀 EthioPOS Server v2.1.0`);
-  console.log(`   📡 URL: http://localhost:${PORT}`);
+  console.log(`   📡 URL: http://0.0.0.0:${PORT}`);
   console.log(`   🌍 Environment: ${NODE_ENV}`);
   console.log(`   🔒 Security: Helmet + Rate Limiting + JWT Auth`);
   console.log(`   📦 Database: SQLite (WAL mode)`);
@@ -2499,5 +2498,3 @@ const server = app.listen(PORT, () => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
 });
-
-module.exports = app;
