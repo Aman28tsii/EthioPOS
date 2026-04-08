@@ -1,179 +1,238 @@
 /**
+ * ═══════════════════════════════════════════════════════════════
  * Authentication Middleware
- * JWT verification and role-based access control
+ * JWT Verification & Role-Based Access Control (RBAC)
+ * Production-Ready Version
+ * ═══════════════════════════════════════════════════════════════
  */
 
 const jwt = require('jsonwebtoken');
-
+const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_fallback_secret_change_in_production';
 
+// Safe logging function
+const logError = (message, error, level = 'warn') => {
+  if (NODE_ENV === 'development') {
+    console[level](`[AUTH] ${message}`, error?.message || '');
+  }
+};
+
 /**
- * Verify JWT Token
- * Extracts and validates the JWT from Authorization header
+ * ────────────────────────────────────────────────────────
+ * VERIFY TOKEN MIDDLEWARE
+ * Validates JWT and attaches decoded payload to req.user
+ * Returns 401 on failure (triggers logout on frontend)
+ * ────────────────────────────────────────────────────────
  */
 const verifyToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  
+  const authHeader = req.get('Authorization');
+
   if (!authHeader) {
-    return res.status(401).json({ 
+    return res.status(401).json({
       success: false,
       error: 'Access denied. No token provided.',
-      code: 'NO_TOKEN'
+      code: 'NO_TOKEN',
+      type: 'unauthorized'
     });
   }
 
-  // Support both "Bearer token" and just "token" formats
-  const token = authHeader.startsWith('Bearer ') 
-    ? authHeader.slice(7) 
-    : authHeader;
+  // Extract token (handle "Bearer TOKEN" format)
+  let token = '';
+  const parts = authHeader.split(/\s+/);
+  
+  if (parts[0]?.toLowerCase() === 'bearer') {
+    token = parts.slice(1).join(' ');
+  } else {
+    token = authHeader;
+  }
+
+  token = token?.trim();
 
   if (!token || token === 'null' || token === 'undefined') {
-    return res.status(401).json({ 
+    return res.status(401).json({
       success: false,
-      error: 'Access denied. Invalid token format.',
-      code: 'INVALID_TOKEN_FORMAT'
+      error: 'Invalid token format.',
+      code: 'INVALID_TOKEN_FORMAT',
+      type: 'unauthorized'
     });
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    // Verify signature AND expiration
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      ignoreExpiration: false
+    });
+
     req.user = decoded;
     next();
   } catch (error) {
+    logError('Token verification failed', error);
+
     if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ 
+      return res.status(401).json({
         success: false,
         error: 'Token has expired. Please login again.',
-        code: 'TOKEN_EXPIRED'
+        code: 'TOKEN_EXPIRED',
+        type: 'unauthorized'
       });
     }
+
     if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({ 
+      return res.status(401).json({
         success: false,
-        error: 'Invalid token. Please login again.',
-        code: 'INVALID_TOKEN'
+        error: 'Invalid token.',
+        code: 'INVALID_TOKEN',
+        type: 'unauthorized'
       });
     }
-    return res.status(401).json({ 
+
+    return res.status(401).json({
       success: false,
-      error: 'Token verification failed.',
-      code: 'TOKEN_VERIFICATION_FAILED'
+      error: 'Authentication failed.',
+      code: 'AUTH_FAILED',
+      type: 'unauthorized'
     });
   }
 };
 
 /**
- * Require Admin Role
- * Allows only admin and owner roles
+ * ────────────────────────────────────────────────────────
+ * REQUIRE ADMIN MIDDLEWARE
+ * Allows: admin, owner
+ * Returns 403 on failure (DO NOT logout)
+ * ────────────────────────────────────────────────────────
  */
 const requireAdmin = (req, res, next) => {
   if (!req.user) {
-    return res.status(401).json({ 
+    return res.status(401).json({
       success: false,
       error: 'Authentication required',
-      code: 'AUTH_REQUIRED'
+      code: 'AUTH_REQUIRED',
+      type: 'unauthorized'
     });
   }
 
   const allowedRoles = ['admin', 'owner'];
-  
-  if (!allowedRoles.includes(req.user.role)) {
-    return res.status(403).json({ 
+  const userRole = String(req.user.role || '').toLowerCase().trim();
+
+  if (!allowedRoles.includes(userRole)) {
+    return res.status(403).json({
       success: false,
       error: 'Access denied. Admin privileges required.',
       code: 'ADMIN_REQUIRED',
-      yourRole: req.user.role
+      yourRole: userRole,
+      type: 'forbidden'
     });
   }
-  
+
   next();
 };
 
 /**
- * Require Owner Role
- * Allows only owner role
+ * ────────────────────────────────────────────────────────
+ * REQUIRE OWNER MIDDLEWARE
+ * Allows: owner only
+ * Returns 403 on failure (DO NOT logout)
+ * ────────────────────────────────────────────────────────
  */
 const requireOwner = (req, res, next) => {
   if (!req.user) {
-    return res.status(401).json({ 
+    return res.status(401).json({
       success: false,
       error: 'Authentication required',
-      code: 'AUTH_REQUIRED'
+      code: 'AUTH_REQUIRED',
+      type: 'unauthorized'
     });
   }
 
-  if (req.user.role !== 'owner') {
-    return res.status(403).json({ 
+  const userRole = String(req.user.role || '').toLowerCase().trim();
+
+  if (userRole !== 'owner') {
+    return res.status(403).json({
       success: false,
       error: 'Access denied. Owner privileges required.',
       code: 'OWNER_REQUIRED',
-      yourRole: req.user.role
+      yourRole: userRole,
+      type: 'forbidden'
     });
   }
-  
+
   next();
 };
 
 /**
- * Require Staff or Higher
- * Allows staff, admin, and owner roles
+ * ────────────────────────────────────────────────────────
+ * REQUIRE STAFF MIDDLEWARE
+ * Allows: staff, admin, owner
+ * ────────────────────────────────────────────────────────
  */
 const requireStaff = (req, res, next) => {
   if (!req.user) {
-    return res.status(401).json({ 
+    return res.status(401).json({
       success: false,
       error: 'Authentication required',
-      code: 'AUTH_REQUIRED'
+      code: 'AUTH_REQUIRED',
+      type: 'unauthorized'
     });
   }
 
   const allowedRoles = ['staff', 'admin', 'owner'];
-  
-  if (!allowedRoles.includes(req.user.role)) {
-    return res.status(403).json({ 
+  const userRole = String(req.user.role || '').toLowerCase().trim();
+
+  if (!allowedRoles.includes(userRole)) {
+    return res.status(403).json({
       success: false,
-      error: 'Access denied. Staff privileges required.',
-      code: 'STAFF_REQUIRED'
+      error: 'Access denied.',
+      code: 'STAFF_REQUIRED',
+      type: 'forbidden'
     });
   }
-  
+
   next();
 };
 
 /**
- * Optional Authentication
- * Continues even if no token is provided, but attaches user if valid token exists
+ * ────────────────────────────────────────────────────────
+ * OPTIONAL AUTH MIDDLEWARE
+ * Attempts to attach user if token exists
+ * Continues even if no token or invalid token
+ * ────────────────────────────────────────────────────────
  */
 const optionalAuth = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  
+  const authHeader = req.get('Authorization');
+
   if (!authHeader) {
+    req.user = null;
     return next();
   }
 
-  const token = authHeader.startsWith('Bearer ') 
-    ? authHeader.slice(7) 
+  const parts = authHeader.split(/\s+/);
+  let token = parts[0]?.toLowerCase() === 'bearer' 
+    ? parts.slice(1).join(' ')
     : authHeader;
 
+  token = token?.trim();
+
   if (!token || token === 'null' || token === 'undefined') {
+    req.user = null;
     return next();
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET, { ignoreExpiration: false });
     req.user = decoded;
   } catch (error) {
-    // Token invalid, but we continue anyway since auth is optional
     req.user = null;
+    logError('Optional auth failed', error, 'debug');
   }
-  
+
   next();
 };
 
-module.exports = { 
-  verifyToken, 
-  requireAdmin, 
-  requireOwner, 
+module.exports = {
+  verifyToken,
+  requireAdmin,
+  requireOwner,
   requireStaff,
-  optionalAuth 
+  optionalAuth
 };

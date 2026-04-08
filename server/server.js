@@ -82,7 +82,7 @@ app.use(cors({
 
 // Rate Limiting
 const generalLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
   message: { 
     success: false,
@@ -92,14 +92,13 @@ const generalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting for health checks
     return req.path === '/api/health' || req.path === '/api/status';
   }
 });
 
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX) || 10, // 10 attempts per 15 min
+  windowMs: 15 * 60 * 1000,
+  max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX) || 10,
   message: { 
     success: false,
     error: 'Too many login attempts. Please try again in 15 minutes.',
@@ -110,8 +109,8 @@ const loginLimiter = rateLimit({
 });
 
 const signupLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5, // 5 signups per hour per IP
+  windowMs: 60 * 60 * 1000,
+  max: 5,
   message: {
     success: false,
     error: 'Too many signup attempts. Please try again later.',
@@ -136,11 +135,10 @@ if (NODE_ENV === 'production') {
   app.use(morgan('dev'));
 }
 
-// Custom request logging with timestamp
+// Custom request logging
 app.use((req, res, next) => {
   req.requestTime = new Date().toISOString();
   
-  // Log request details in development
   if (NODE_ENV === 'development') {
     console.log(`📨 ${req.requestTime} | ${req.method} ${req.path} | IP: ${req.ip}`);
   }
@@ -243,7 +241,6 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
       }
 
       if (!user) {
-        // Generic message to prevent user enumeration
         return res.status(401).json({ 
           success: false,
           error: 'Invalid email or password' 
@@ -443,6 +440,53 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
       error: 'Server error during signup' 
     });
   }
+});
+
+/**
+ * ✅ GET /api/auth/verify
+ * 🎯 CRITICAL ENDPOINT FOR FRONTEND TOKEN VALIDATION
+ * Frontend calls this on app initialization to validate token
+ * Prevents "redirect loop" issue by checking token validity before rendering protected pages
+ */
+app.get('/api/auth/verify', verifyToken, (req, res) => {
+  // If verifyToken middleware passes, the token is valid and not expired
+  // Fetch fresh user data from database to ensure user still exists and is active
+  
+  db.get(
+    "SELECT id, name, email, role, status FROM users WHERE id = ? AND status = 'active'",
+    [req.user.id],
+    (err, user) => {
+      if (err) {
+        console.error("Verify token - DB error:", err);
+        return res.status(500).json({
+          success: false,
+          valid: false,
+          error: 'Database error during verification'
+        });
+      }
+
+      // User not found or deactivated
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          valid: false,
+          error: 'User account not found or deactivated'
+        });
+      }
+
+      // Token is valid and user is active
+      res.json({
+        success: true,
+        valid: true,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role
+        }
+      });
+    }
+  );
 });
 
 /**
@@ -841,7 +885,7 @@ app.patch('/api/products/:id/stock', verifyToken, requireAdmin, (req, res) => {
       }
     );
   } else if (adjustment !== undefined) {
-    // Adjust stock by value (can be negative)
+    // Adjust stock by value
     db.run(
       "UPDATE products SET stock = MAX(0, stock + ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
       [Number(adjustment), id],
@@ -863,7 +907,6 @@ app.patch('/api/products/:id/stock', verifyToken, requireAdmin, (req, res) => {
 /**
  * DELETE /api/products/:id
  * Delete product (Admin/Owner only)
- * Soft delete by setting is_active = 0
  */
 app.delete('/api/products/:id', verifyToken, requireAdmin, (req, res) => {
   const { id } = req.params;
@@ -935,7 +978,7 @@ app.delete('/api/products/:id', verifyToken, requireAdmin, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// SALES ROUTES (With Transaction Support)
+// SALES ROUTES
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -981,11 +1024,7 @@ app.post('/api/sales', verifyToken, (req, res) => {
   const itemCount = items_count || items.reduce((sum, item) => sum + item.quantity, 0);
   const paymentMethodValue = payment_method || 'cash';
 
-  // ═══════════════════════════════════════════════════════════
-  // TRANSACTION-BASED SALE PROCESSING
-  // ═══════════════════════════════════════════════════════════
-
-  // First, validate all stock levels before starting transaction
+  // Stock validation
   const stockCheckPromises = items.map(item => {
     return new Promise((resolve, reject) => {
       db.get(
@@ -1013,7 +1052,7 @@ app.post('/api/sales', verifyToken, (req, res) => {
 
   Promise.all(stockCheckPromises)
     .then(() => {
-      // All stock checks passed, proceed with transaction
+      // All stock checks passed
       db.serialize(() => {
         db.run("BEGIN TRANSACTION");
 
@@ -1156,7 +1195,6 @@ app.get('/api/sales/history', verifyToken, (req, res) => {
       break;
   }
 
-  // Additional filters
   let additionalFilters = "";
   const params = [];
 
@@ -1785,7 +1823,6 @@ app.delete('/api/staff/:id', verifyToken, requireOwner, (req, res) => {
  */
 app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
   const queries = {
-    // Today's stats
     todayStats: `
       SELECT 
         COALESCE(SUM(total_amount), 0) as revenue,
@@ -1795,7 +1832,6 @@ app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
       WHERE date(created_at) = date('now', 'localtime') 
       AND status = 'completed'
     `,
-    // Yesterday's stats for comparison
     yesterdayStats: `
       SELECT 
         COALESCE(SUM(total_amount), 0) as revenue,
@@ -1804,7 +1840,6 @@ app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
       WHERE date(created_at) = date('now', '-1 day', 'localtime')
       AND status = 'completed'
     `,
-    // This week stats
     weekStats: `
       SELECT 
         COALESCE(SUM(total_amount), 0) as revenue,
@@ -1813,7 +1848,6 @@ app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
       WHERE created_at >= date('now', '-7 days')
       AND status = 'completed'
     `,
-    // This month stats
     monthStats: `
       SELECT 
         COALESCE(SUM(total_amount), 0) as revenue,
@@ -1822,14 +1856,12 @@ app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
       WHERE created_at >= date('now', '-30 days')
       AND status = 'completed'
     `,
-    // Staff count
     staffCount: `
       SELECT 
         COUNT(*) as total,
         COUNT(CASE WHEN status = 'active' THEN 1 END) as active
       FROM users
     `,
-    // Product stats
     productStats: `
       SELECT 
         COUNT(*) as total,
@@ -1894,7 +1926,7 @@ app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
 
 /**
  * GET /api/analytics/daily-stats
- * Get daily business statistics (backward compatible format)
+ * Get daily business statistics
  */
 app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
   const statsQuery = `
@@ -1923,7 +1955,6 @@ app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
     const todayOrders = row?.today_orders || 0;
     const yesterdayOrders = row?.yesterday_orders || 0;
 
-    // Calculate percentage changes
     let revChange = 0;
     if (yestRev === 0 && todayRev > 0) {
       revChange = 100;
@@ -1940,7 +1971,6 @@ app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
 
     const avgSpend = todayOrders > 0 ? (todayRev / todayOrders) : 0;
 
-    // Return in the format expected by frontend
     res.json([
       { 
         title: 'Daily Revenue', 
@@ -2092,7 +2122,6 @@ app.get('/api/analytics/hourly-sales', verifyToken, (req, res) => {
       return res.status(500).json({ success: false, error: err.message });
     }
 
-    // Fill in missing hours with zeros
     const hoursMap = {};
     (rows || []).forEach(r => {
       hoursMap[parseInt(r.hour)] = {
@@ -2337,7 +2366,6 @@ app.post('/api/categories', verifyToken, requireAdmin, (req, res) => {
 app.delete('/api/categories/:id', verifyToken, requireAdmin, (req, res) => {
   const { id } = req.params;
 
-  // Check if category is in use
   db.get(
     "SELECT COUNT(*) as count FROM products WHERE category = (SELECT name FROM categories WHERE id = ?)",
     [id],
@@ -2386,7 +2414,6 @@ app.use((err, req, res, next) => {
   console.error('🔥 Server Error:', err);
   console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  // Don't leak error details in production
   const message = NODE_ENV === 'production' 
     ? 'Internal server error' 
     : err.message;
@@ -2405,7 +2432,6 @@ app.use((err, req, res, next) => {
 const shutdown = (signal) => {
   console.log(`\n📛 Received ${signal}. Shutting down gracefully...`);
   
-  // Close database connection
   db.close((err) => {
     if (err) {
       console.error('❌ Error closing database:', err);
@@ -2417,7 +2443,6 @@ const shutdown = (signal) => {
     process.exit(err ? 1 : 0);
   });
 
-  // Force exit after 10 seconds
   setTimeout(() => {
     console.error('⚠️  Forced shutdown after timeout');
     process.exit(1);
@@ -2427,7 +2452,6 @@ const shutdown = (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('💀 Uncaught Exception:', err);
   shutdown('uncaughtException');
@@ -2457,7 +2481,7 @@ const server = app.listen(PORT, () => {
   console.log(`   🚀 EthioPOS Server v2.1.0`);
   console.log(`   📡 URL: http://localhost:${PORT}`);
   console.log(`   🌍 Environment: ${NODE_ENV}`);
-  console.log(`   🔒 Security: Helmet + Rate Limiting`);
+  console.log(`   🔒 Security: Helmet + Rate Limiting + JWT Auth`);
   console.log(`   📦 Database: SQLite (WAL mode)`);
   console.log(`   ⏰ Started: ${new Date().toLocaleString()}`);
   console.log('');
@@ -2466,6 +2490,9 @@ const server = app.listen(PORT, () => {
   console.log('   📧 Default Login:');
   console.log('      Email: owner@ethiopos.com');
   console.log('      Password: owner123');
+  console.log('');
+  console.log('   ✅ Critical Endpoint Added:');
+  console.log('      GET /api/auth/verify - Token validation for frontend');
   console.log('');
   console.log('   ⚠️  Change default password in production!');
   console.log('');
