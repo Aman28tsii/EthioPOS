@@ -1,21 +1,21 @@
 /**
  * Database Configuration
  * SQLite Database Setup with Auto-initialization
+ * Production-Ready for Render Deployment
  */
 
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const fs = require('fs');
 
-// Ensure database directory exists
-const dbDir = path.join(__dirname, '..', 'database');
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-  console.log('📁 Database directory created');
-}
+// ✅ CRITICAL: Use /tmp/ for production (Render), local for development
+const isProduction = process.env.NODE_ENV === 'production';
+const dbPath = isProduction 
+  ? '/tmp/ethiopos.db'  // Render uses /tmp/ (ephemeral but works)
+  : path.join(__dirname, '..', 'database', 'ethiopos.db');  // Local dev
 
-const dbPath = process.env.DATABASE_PATH || path.join(dbDir, 'ethiopos.db');
+console.log(`📦 Database Path: ${dbPath}`);
+
 const db = new sqlite3.Database(dbPath);
 
 // Enable foreign keys and WAL mode for better performance
@@ -90,7 +90,7 @@ const initializeDatabase = () => {
         )
       `);
 
-      // Categories table (optional, for better organization)
+      // Categories table
       db.run(`
         CREATE TABLE IF NOT EXISTS categories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +100,7 @@ const initializeDatabase = () => {
         )
       `);
 
-      // Activity log table (for audit trail)
+      // Activity log table
       db.run(`
         CREATE TABLE IF NOT EXISTS activity_logs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
