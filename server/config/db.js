@@ -1,24 +1,34 @@
 /**
  * Database Configuration
- * SQLite Database Setup with Auto-initialization
- * Production-Ready for Render Deployment
+ * FIXED FOR RENDER DEPLOYMENT
  */
 
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
 
-// ✅ CRITICAL: Use /tmp/ for production (Render), local for development
+// ✅ FIX: Correct path for Render (Production) vs Local (Development)
 const isProduction = process.env.NODE_ENV === 'production';
-const dbPath = isProduction 
-  ? '/tmp/ethiopos.db'  // Render uses /tmp/ (ephemeral but works)
-  : path.join(__dirname, '..', 'database', 'ethiopos.db');  // Local dev
+
+// On Render, we MUST use /tmp/ directory. It's the only writable place.
+const dbDir = isProduction 
+  ? '/tmp' 
+  : path.join(__dirname, '..', 'database');
+
+// Ensure directory exists (Critical for Local dev, harmless on Render)
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+const dbPath = path.join(dbDir, 'ethiopos.db');
 
 console.log(`📦 Database Path: ${dbPath}`);
+console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 
 const db = new sqlite3.Database(dbPath);
 
-// Enable foreign keys and WAL mode for better performance
+// Enable foreign keys and WAL mode
 db.run("PRAGMA foreign_keys = ON");
 db.run("PRAGMA journal_mode = WAL");
 
@@ -115,14 +125,14 @@ const initializeDatabase = () => {
         )
       `);
 
-      // Create indexes for better performance
+      // Indexes
       db.run(`CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at)`);
       db.run(`CREATE INDEX IF NOT EXISTS idx_orders_staff_id ON orders(staff_id)`);
       db.run(`CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`);
       db.run(`CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)`);
       db.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`);
 
-      // Check if default owner exists, if not create one
+      // Default Owner Creation
       db.get("SELECT COUNT(*) as count FROM users WHERE role = 'owner'", [], async (err, row) => {
         if (err) {
           console.error("Error checking for owner:", err);
@@ -145,7 +155,6 @@ const initializeDatabase = () => {
                   console.log('✅ Default owner account created');
                   console.log('   📧 Email: owner@ethiopos.com');
                   console.log('   🔑 Password: owner123');
-                  console.log('   ⚠️  Please change this password immediately!');
                 }
               }
             );
@@ -155,7 +164,7 @@ const initializeDatabase = () => {
         }
       });
 
-      // Insert default categories if empty
+      // Default Categories
       db.get("SELECT COUNT(*) as count FROM categories", [], (err, row) => {
         if (!err && row.count === 0) {
           const defaultCategories = ['General', 'Food', 'Beverages', 'Electronics', 'Clothing', 'Household'];
@@ -171,7 +180,7 @@ const initializeDatabase = () => {
   });
 };
 
-// Initialize on module load
+// Initialize
 initializeDatabase()
   .then(() => {
     console.log('✅ Database initialized successfully');
