@@ -8,7 +8,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import API from './config/axios';
+import API from './api/axios';
 import Layout from './components/Layout';
 import AuthPage from './pages/Login';
 import Signup from './pages/Signup';
