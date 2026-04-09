@@ -16,34 +16,34 @@ function App() {
   const [user, setUser] = useState(null);
 
   useEffect(() => {
-    const validateToken = async () => {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        setIsAuthenticated(false);
-        setLoading(false);
-        return;
-      }
+  const validateToken = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      setIsAuthenticated(false);
+      setLoading(false);
+      return;
+    }
 
-      try {
-        const response = await API.get('/auth/verify');
-        if (response.data.success && response.data.valid) {
-          setIsAuthenticated(true);
-          setUser(response.data.user);
-        } else {
-          throw new Error('Invalid token');
-        }
-      } catch (error) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        setIsAuthenticated(false);
-        setUser(null);
-      } finally {
-        setLoading(false);
+    try {
+      const response = await API.get('/auth/verify'); // ✅ Uses our axios
+      if (response.data.success && response.data.valid) {
+        setIsAuthenticated(true);
+        setUser(response.data.user);
+      } else {
+        throw new Error('Invalid token response');
       }
-    };
+    } catch (error) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      setIsAuthenticated(false);
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    validateToken();
-  }, []);
+  validateToken();
+}, []);
 
   useEffect(() => {
     const handleAuthChange = () => {
