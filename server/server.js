@@ -211,63 +211,82 @@ app.get('/api/status', (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 /**
+/**
  * POST /api/auth/login
  * Authenticate user and return JWT token
+ * ✅ Fixed: shows correct message for pending/inactive accounts
  */
 app.post('/api/auth/login', loginLimiter, (req, res) => {
   const { email, password } = req.body;
 
   // Validation
   if (!email || !password) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Email and password are required' 
+      error: 'Email and password are required'
     });
   }
 
   const normalizedEmail = email.toLowerCase().trim();
 
-  // Find user
+  // ✅ IMPORTANT CHANGE:
+  // We do NOT filter by status in SQL anymore.
+  // We fetch user first, then we check status so we can return correct message.
   db.get(
-    "SELECT * FROM users WHERE email = ? AND status = 'active'",
+    "SELECT * FROM users WHERE email = ?",
     [normalizedEmail],
     async (err, user) => {
       if (err) {
         console.error("Login DB Error:", err);
-        return res.status(500).json({ 
+        return res.status(500).json({
           success: false,
-          error: 'Database error during authentication' 
+          error: 'Database error during authentication'
         });
       }
 
       if (!user) {
-        return res.status(401).json({ 
+        return res.status(401).json({
           success: false,
-          error: 'Invalid email or password' 
+          error: 'Invalid email or password'
+        });
+      }
+
+      // ✅ Status check (this is the main improvement)
+      if (user.status === 'pending') {
+        return res.status(403).json({
+          success: false,
+          error: 'Account pending owner approval'
+        });
+      }
+
+      if (user.status === 'inactive' || user.status === 'suspended') {
+        return res.status(403).json({
+          success: false,
+          error: 'Account is inactive. Contact owner.'
         });
       }
 
       try {
         // Verify password
         const isMatch = await bcrypt.compare(password, user.password);
-        
+
         if (!isMatch) {
-          return res.status(401).json({ 
+          return res.status(401).json({
             success: false,
-            error: 'Invalid email or password' 
+            error: 'Invalid email or password'
           });
         }
 
         // Generate JWT token
-        const tokenPayload = { 
-          id: user.id, 
-          email: user.email, 
+        const tokenPayload = {
+          id: user.id,
+          email: user.email,
           role: user.role,
           name: user.name
         };
-        
-        const token = jwt.sign(tokenPayload, JWT_SECRET, { 
-          expiresIn: JWT_EXPIRES_IN 
+
+        const token = jwt.sign(tokenPayload, JWT_SECRET, {
+          expiresIn: JWT_EXPIRES_IN
         });
 
         // Log successful login
@@ -276,8 +295,8 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
           [user.id, 'LOGIN', 'Successful login', req.ip]
         );
 
-        // Return success response
-        res.json({
+        // ✅ Return success response (include status too)
+        return res.json({
           success: true,
           message: 'Login successful',
           token,
@@ -285,14 +304,15 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
             id: user.id,
             name: user.name,
             email: user.email,
-            role: user.role
+            role: user.role,
+            status: user.status
           }
         });
       } catch (error) {
         console.error("Password compare error:", error);
-        res.status(500).json({ 
+        return res.status(500).json({
           success: false,
-          error: 'Authentication error' 
+          error: 'Authentication error'
         });
       }
     }
@@ -1812,7 +1832,90 @@ app.delete('/api/staff/:id', verifyToken, requireOwner, (req, res) => {
     );
   }
 });
+// ═══════════════════════════════════════════
+// COMMENTS ROUTES
+// ═══════════════════════════════════════════
 
+// GET all comments
+app.get('/api/comments', verifyToken, (req, res) => {
+  db.all(
+    "SELECT * FROM comments ORDER BY created_at DESC",
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, data: rows || [] });
+    }
+  );
+});
+
+// POST new comment
+app.post('/api/comments', verifyToken, (req, res) => {
+  const { customer_name, message, type, rating, status } = req.body;
+
+  if (!message || message.trim() === '') {
+    return res.status(400).json({ error: 'Message is required' });
+  }
+
+  db.run(
+    `INSERT INTO comments 
+     (customer_name, message, type, rating, status, created_by) 
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      customer_name || 'Anonymous',
+      message.trim(),
+      type || 'feedback',
+      rating || 5,
+      status || 'pending',
+      req.user.id
+    ],
+    function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(201).json({
+        success: true,
+        comment: {
+          id: this.lastID,
+          customer_name: customer_name || 'Anonymous',
+          message: message.trim(),
+          type: type || 'feedback',
+          rating: rating || 5,
+          status: status || 'pending',
+          created_at: new Date().toISOString()
+        }
+      });
+    }
+  );
+});
+
+// PUT update comment status
+app.put('/api/comments/:id', verifyToken, requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  db.run(
+    "UPDATE comments SET status = ? WHERE id = ?",
+    [status, id],
+    function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      if (this.changes === 0) return res.status(404).json({ error: 'Comment not found' });
+      res.json({ success: true, message: 'Status updated' });
+    }
+  );
+});
+
+// DELETE comment
+app.delete('/api/comments/:id', verifyToken, requireAdmin, (req, res) => {
+  const { id } = req.params;
+
+  db.run(
+    "DELETE FROM comments WHERE id = ?",
+    [id],
+    function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      if (this.changes === 0) return res.status(404).json({ error: 'Comment not found' });
+      res.json({ success: true, message: 'Comment deleted' });
+    }
+  );
+});
 // ═══════════════════════════════════════════════════════════════
 // ANALYTICS ROUTES
 // ═══════════════════════════════════════════════════════════════

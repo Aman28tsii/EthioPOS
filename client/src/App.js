@@ -1,116 +1,101 @@
-import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import API from './api/axios';
-import Layout from './components/Layout';
-import AuthPage from './pages/Login';
-import Signup from './pages/Signup';
+import React, { useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
 import POS from './pages/POS';
-import Analytics from './pages/Analytics';
 import Inventory from './pages/Inventory';
 import Staff from './pages/Staff';
-import { Loader2 } from 'lucide-react';
+import Analytics from './pages/Analytics';
+import Comments from './pages/Comments';
+import Layout from './components/Layout';
 
-function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(null);
-  const [loading, setLoading] = useState(true);
+const App = () => {
   const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-  const validateToken = async () => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      setIsAuthenticated(false);
-      setLoading(false);
-      return;
-    }
+    const checkAuth = () => {
+      try {
+        const token = localStorage.getItem('token');
+        const userData = localStorage.getItem('user');
 
-    try {
-      const response = await API.get('/auth/verify'); // ✅ Uses our axios
-      if (response.data.success && response.data.valid) {
-        setIsAuthenticated(true);
-        setUser(response.data.user);
-      } else {
-        throw new Error('Invalid token response');
+        if (token && userData) {
+          setUser(JSON.parse(userData));
+        } else {
+          setUser(null);
+        }
+      } catch (e) {
+        setUser(null);
+      } finally {
+        setLoading(false);
       }
-    } catch (error) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      setIsAuthenticated(false);
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  validateToken();
-}, []);
-
-  useEffect(() => {
-    const handleAuthChange = () => {
-      const token = localStorage.getItem('token');
-      setIsAuthenticated(!!token);
-      if (!token) setUser(null);
     };
 
-    window.addEventListener('loginStateChange', handleAuthChange);
-    window.addEventListener('storage', handleAuthChange);
+    checkAuth();
 
-    return () => {
-      window.removeEventListener('loginStateChange', handleAuthChange);
-      window.removeEventListener('storage', handleAuthChange);
-    };
+    const onAuthChange = () => checkAuth();
+    window.addEventListener('loginStateChange', onAuthChange);
+
+    return () => window.removeEventListener('loginStateChange', onAuthChange);
   }, []);
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-gray-900">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="animate-spin text-blue-500" size={40} />
-          <div className="text-center">
-            <h2 className="text-xl font-bold text-white">EthioPOS</h2>
-            <p className="text-gray-400 text-sm mt-1">Verifying session...</p>
-          </div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-gray-400 font-medium">Loading EthioPOS...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <Router>
+    <BrowserRouter>
       <Routes>
-        {/* Public Routes */}
+        {/* Public */}
         <Route
           path="/login"
-          element={!isAuthenticated ? <AuthPage /> : <Navigate to="/pos" replace />}
+          element={user ? <Navigate to="/dashboard" replace /> : <Login />}
         />
         <Route
           path="/signup"
-          element={!isAuthenticated ? <Signup /> : <Navigate to="/pos" replace />}
+          element={user ? <Navigate to="/dashboard" replace /> : <Login />}
         />
 
-        {/* Protected Routes */}
+        {/* Protected */}
         <Route
-          path="/*"
-          element={
-            isAuthenticated ? (
-              <Layout user={user}>
-                <Routes>
-                  <Route path="/pos" element={<POS />} />
-                  <Route path="/analytics" element={<Analytics />} />
-                  <Route path="/inventory" element={<Inventory />} />
-                  <Route path="/staff" element={<Staff />} />
-                  <Route path="/" element={<Navigate to="/pos" replace />} />
-                  <Route path="*" element={<Navigate to="/pos" replace />} />
-                </Routes>
-              </Layout>
-            ) : (
-              <Navigate to="/login" replace />
-            )
-          }
+          path="/"
+          element={user ? <Layout user={user} /> : <Navigate to="/login" replace />}
+        >
+          <Route index element={<Navigate to="/dashboard" replace />} />
+
+          <Route path="dashboard" element={<Dashboard user={user} />} />
+          <Route path="pos" element={<POS />} />
+<Route path="/comments" element={<Comments />} />
+          {/* Admin + Owner */}
+          {(user?.role === 'admin' || user?.role === 'owner') && (
+            <>
+              <Route path="inventory" element={<Inventory />} />
+              <Route path="analytics" element={<Analytics />} />
+            </>
+          )}
+
+          {/* Owner only */}
+          {user?.role === 'owner' && (
+            <Route path="staff" element={<Staff />} />
+          )}
+        </Route>
+
+        {/* Fallback */}
+        <Route
+          path="*"
+          element={<Navigate to={user ? "/dashboard" : "/login"} replace />}
         />
       </Routes>
-    </Router>
+    </BrowserRouter>
   );
-}
+};
 
 export default App;

@@ -1,6 +1,6 @@
 /**
  * Database Configuration
- * FIXED FOR RENDER DEPLOYMENT
+ * FIXED FOR RENDER DEPLOYMENT + supports PENDING users
  */
 
 const sqlite3 = require('sqlite3').verbose();
@@ -8,15 +8,13 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 
-// ✅ FIX: Correct path for Render (Production) vs Local (Development)
 const isProduction = process.env.NODE_ENV === 'production';
 
 // On Render, we MUST use /tmp/ directory. It's the only writable place.
-const dbDir = isProduction 
-  ? '/tmp' 
+const dbDir = isProduction
+  ? '/tmp'
   : path.join(__dirname, '..', 'database');
 
-// Ensure directory exists (Critical for Local dev, harmless on Render)
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
@@ -28,7 +26,6 @@ console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 
 const db = new sqlite3.Database(dbPath);
 
-// Enable foreign keys and WAL mode
 db.run("PRAGMA foreign_keys = ON");
 db.run("PRAGMA journal_mode = WAL");
 
@@ -46,7 +43,8 @@ const initializeDatabase = () => {
           email TEXT UNIQUE NOT NULL,
           password TEXT NOT NULL,
           role TEXT DEFAULT 'staff' CHECK(role IN ('owner', 'admin', 'staff')),
-          status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'suspended')),
+          -- ✅ UPDATED: added 'pending'
+          status TEXT DEFAULT 'active' CHECK(status IN ('active', 'pending', 'inactive', 'suspended')),
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -109,7 +107,22 @@ const initializeDatabase = () => {
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
       `);
-
+// Add inside initializeDatabase() with other CREATE TABLE statements
+db.run(`
+  CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_name TEXT DEFAULT 'Anonymous',
+    message TEXT NOT NULL,
+    type TEXT DEFAULT 'feedback' 
+         CHECK(type IN ('feedback','complaint','suggestion','praise')),
+    rating INTEGER DEFAULT 5 CHECK(rating BETWEEN 1 AND 5),
+    status TEXT DEFAULT 'pending' 
+           CHECK(status IN ('pending','reviewed','resolved')),
+    created_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+  )
+`);
       // Activity log table
       db.run(`
         CREATE TABLE IF NOT EXISTS activity_logs (
@@ -180,13 +193,8 @@ const initializeDatabase = () => {
   });
 };
 
-// Initialize
 initializeDatabase()
-  .then(() => {
-    console.log('✅ Database initialized successfully');
-  })
-  .catch((err) => {
-    console.error('❌ Database initialization failed:', err);
-  });
+  .then(() => console.log('✅ Database initialized successfully'))
+  .catch((err) => console.error('❌ Database initialization failed:', err));
 
 module.exports = db;
