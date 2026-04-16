@@ -1,8 +1,19 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  * EthioPOS Backend Server
- * Version: 2.1.0 (Production Ready)
+ * Version: 3.0.0 (PostgreSQL + Production Ready)
  * Complete API with Authentication, Products, Sales, Staff, and Analytics
+ * 
+ * MIGRATION NOTES:
+ * - SQLite → PostgreSQL (Neon.tech)
+ * - ? placeholders → $1, $2, $3
+ * - this.lastID → RETURNING id
+ * - this.changes → result.rowCount
+ * - date('now','localtime') → CURRENT_DATE
+ * - strftime('%H', col) → EXTRACT(HOUR FROM col)
+ * - LIKE → ILIKE (case insensitive)
+ * - MAX(0, x) → GREATEST(0, x)
+ * - db.serialize + BEGIN → client transaction
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
@@ -11,7 +22,6 @@ require('dotenv').config();
 // Validate environment variables before starting
 const validateEnv = require('./config/validateEnv');
 validateEnv();
-
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -20,7 +30,8 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-const db = require('./config/db');
+// ✅ CHANGED: db is now a pg Pool instead of sqlite3 Database
+const pool = require('./config/db');
 const { verifyToken, requireAdmin, requireOwner, requireStaff, optionalAuth } = require('./middleware/auth');
 const ApiResponse = require('./utils/apiResponse');
 
@@ -135,10 +146,11 @@ if (NODE_ENV === 'production') {
   app.use(morgan('dev'));
 }
 
-// Custom request logging
+// Custom request logging with timestamp
 app.use((req, res, next) => {
   req.requestTime = new Date().toISOString();
   
+  // Log request details in development
   if (NODE_ENV === 'development') {
     console.log(`📨 ${req.requestTime} | ${req.method} ${req.path} | IP: ${req.ip}`);
   }
@@ -154,31 +166,21 @@ app.use((req, res, next) => {
  * GET /api/health
  * Comprehensive health check with database status
  */
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   const startTime = Date.now();
   
-  db.get("SELECT 1 as check", [], (err) => {
+  try {
+    // ✅ CHANGED: pool.query instead of db.get
+    await pool.query("SELECT 1 as check");
     const dbResponseTime = Date.now() - startTime;
-    
-    if (err) {
-      return res.status(503).json({
-        status: 'unhealthy',
-        version: '2.1.0',
-        database: {
-          status: 'disconnected',
-          error: err.message
-        },
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString()
-      });
-    }
 
     res.json({
       status: 'healthy',
-      version: '2.1.0',
+      version: '3.0.0',
       environment: NODE_ENV,
       database: {
         status: 'connected',
+        type: 'PostgreSQL (Neon.tech)',
         responseTime: `${dbResponseTime}ms`
       },
       server: {
@@ -190,7 +192,18 @@ app.get('/api/health', (req, res) => {
       },
       timestamp: new Date().toISOString()
     });
-  });
+  } catch (err) {
+    res.status(503).json({
+      status: 'unhealthy',
+      version: '3.0.0',
+      database: {
+        status: 'disconnected',
+        error: err.message
+      },
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 /**
@@ -200,8 +213,8 @@ app.get('/api/health', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({ 
     status: 'online', 
-    version: '2.1.0',
-    database: 'connected',
+    version: '3.0.0',
+    database: 'PostgreSQL',
     timestamp: new Date().toISOString()
   });
 });
@@ -211,12 +224,11 @@ app.get('/api/status', (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 /**
-/**
  * POST /api/auth/login
  * Authenticate user and return JWT token
  * ✅ Fixed: shows correct message for pending/inactive accounts
  */
-app.post('/api/auth/login', loginLimiter, (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   // Validation
@@ -229,94 +241,85 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
 
   const normalizedEmail = email.toLowerCase().trim();
 
-  // ✅ IMPORTANT CHANGE:
-  // We do NOT filter by status in SQL anymore.
-  // We fetch user first, then we check status so we can return correct message.
-  db.get(
-    "SELECT * FROM users WHERE email = ?",
-    [normalizedEmail],
-    async (err, user) => {
-      if (err) {
-        console.error("Login DB Error:", err);
-        return res.status(500).json({
-          success: false,
-          error: 'Database error during authentication'
-        });
-      }
+  try {
+    // ✅ CHANGED: pool.query with $1 instead of db.get with ?
+    const result = await pool.query(
+      "SELECT * FROM users WHERE email = $1",
+      [normalizedEmail]
+    );
+    const user = result.rows[0];
 
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          error: 'Invalid email or password'
-        });
-      }
-
-      // ✅ Status check (this is the main improvement)
-      if (user.status === 'pending') {
-        return res.status(403).json({
-          success: false,
-          error: 'Account pending owner approval'
-        });
-      }
-
-      if (user.status === 'inactive' || user.status === 'suspended') {
-        return res.status(403).json({
-          success: false,
-          error: 'Account is inactive. Contact owner.'
-        });
-      }
-
-      try {
-        // Verify password
-        const isMatch = await bcrypt.compare(password, user.password);
-
-        if (!isMatch) {
-          return res.status(401).json({
-            success: false,
-            error: 'Invalid email or password'
-          });
-        }
-
-        // Generate JWT token
-        const tokenPayload = {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          name: user.name
-        };
-
-        const token = jwt.sign(tokenPayload, JWT_SECRET, {
-          expiresIn: JWT_EXPIRES_IN
-        });
-
-        // Log successful login
-        db.run(
-          "INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES (?, ?, ?, ?)",
-          [user.id, 'LOGIN', 'Successful login', req.ip]
-        );
-
-        // ✅ Return success response (include status too)
-        return res.json({
-          success: true,
-          message: 'Login successful',
-          token,
-          user: {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            status: user.status
-          }
-        });
-      } catch (error) {
-        console.error("Password compare error:", error);
-        return res.status(500).json({
-          success: false,
-          error: 'Authentication error'
-        });
-      }
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid email or password'
+      });
     }
-  );
+
+    // ✅ Status check (this is the main improvement)
+    if (user.status === 'pending') {
+      return res.status(403).json({
+        success: false,
+        error: 'Account pending owner approval'
+      });
+    }
+
+    if (user.status === 'inactive' || user.status === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        error: 'Account is inactive. Contact owner.'
+      });
+    }
+
+    // Verify password
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid email or password'
+      });
+    }
+
+    // Generate JWT token
+    const tokenPayload = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name
+    };
+
+    const token = jwt.sign(tokenPayload, JWT_SECRET, {
+      expiresIn: JWT_EXPIRES_IN
+    });
+
+    // Log successful login (fire and forget)
+    // ✅ CHANGED: pool.query with $1, $2, $3
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES ($1, $2, $3, $4)",
+      [user.id, 'LOGIN', 'Successful login', req.ip]
+    ).catch(err => console.error('Log error:', err));
+
+    // ✅ Return success response (include status too)
+    return res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status
+      }
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    return res.status(500).json({
+      success: false,
+      error: 'Authentication error'
+    });
+  }
 });
 
 /**
@@ -364,96 +367,84 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
 
   try {
     // Check if any users exist (for first user logic)
-    db.get("SELECT COUNT(*) as count FROM users", [], async (countErr, countRow) => {
-      if (countErr) {
-        console.error("Count users error:", countErr);
-        return res.status(500).json({ 
+    // ✅ CHANGED: pool.query with await
+    const countResult = await pool.query("SELECT COUNT(*) as count FROM users");
+    const isFirstUser = parseInt(countResult.rows[0].count) === 0;
+    let assignedRole = 'staff';
+
+    if (isFirstUser) {
+      // First user becomes owner automatically
+      assignedRole = 'owner';
+      console.log('🎉 Creating first user as owner');
+    } else {
+      // Check invite code for elevated roles
+      const requestedRole = (role || 'staff').toLowerCase();
+      
+      if (requestedRole === 'owner') {
+        return res.status(403).json({ 
           success: false,
-          error: 'Database error' 
+          error: 'Owner account already exists' 
         });
       }
 
-      const isFirstUser = countRow.count === 0;
-      let assignedRole = 'staff';
-
-      if (isFirstUser) {
-        // First user becomes owner automatically
-        assignedRole = 'owner';
-        console.log('🎉 Creating first user as owner');
-      } else {
-        // Check invite code for elevated roles
-        const requestedRole = (role || 'staff').toLowerCase();
-        
-        if (requestedRole === 'owner') {
+      if (requestedRole === 'admin') {
+        // Require invite code for admin
+        const validInviteCode = process.env.SIGNUP_INVITE_CODE;
+        if (!validInviteCode || inviteCode !== validInviteCode) {
           return res.status(403).json({ 
             success: false,
-            error: 'Owner account already exists' 
+            error: 'Valid invite code required for admin registration' 
           });
         }
-
-        if (requestedRole === 'admin') {
-          // Require invite code for admin
-          const validInviteCode = process.env.SIGNUP_INVITE_CODE;
-          if (!validInviteCode || inviteCode !== validInviteCode) {
-            return res.status(403).json({ 
-              success: false,
-              error: 'Valid invite code required for admin registration' 
-            });
-          }
-          assignedRole = 'admin';
-        }
+        assignedRole = 'admin';
       }
+    }
 
-      // Validate final role
-      if (!['owner', 'admin', 'staff'].includes(assignedRole)) {
-        return res.status(400).json({ 
-          success: false,
-          error: 'Invalid role' 
-        });
+    // Validate final role
+    if (!['owner', 'admin', 'staff'].includes(assignedRole)) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Invalid role' 
+      });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    // Insert user
+    // ✅ CHANGED: RETURNING id instead of this.lastID
+    const insertResult = await pool.query(
+      "INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, 'active') RETURNING id",
+      [trimmedName, normalizedEmail, hashedPassword, assignedRole]
+    );
+
+    const newId = insertResult.rows[0].id;
+
+    // Log account creation (fire and forget)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES ($1, $2, $3, $4)",
+      [newId, 'SIGNUP', `Account created with role: ${assignedRole}`, req.ip]
+    ).catch(err => console.error('Log error:', err));
+
+    res.status(201).json({ 
+      success: true,
+      message: 'Account created successfully', 
+      user: { 
+        id: newId, 
+        name: trimmedName, 
+        email: normalizedEmail, 
+        role: assignedRole 
       }
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 12);
-
-      // Insert user
-      db.run(
-        "INSERT INTO users (name, email, password, role, status) VALUES (?, ?, ?, ?, 'active')",
-        [trimmedName, normalizedEmail, hashedPassword, assignedRole],
-        function(err) {
-          if (err) {
-            if (err.message.includes('UNIQUE constraint')) {
-              return res.status(400).json({ 
-                success: false,
-                error: 'Email already registered' 
-              });
-            }
-            console.error("Signup error:", err);
-            return res.status(500).json({ 
-              success: false,
-              error: 'Database error during signup' 
-            });
-          }
-          
-          // Log account creation
-          db.run(
-            "INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES (?, ?, ?, ?)",
-            [this.lastID, 'SIGNUP', `Account created with role: ${assignedRole}`, req.ip]
-          );
-
-          res.status(201).json({ 
-            success: true,
-            message: 'Account created successfully', 
-            user: { 
-              id: this.lastID, 
-              name: trimmedName, 
-              email: normalizedEmail, 
-              role: assignedRole 
-            }
-          });
-        }
-      );
     });
+
   } catch (error) {
+    // ✅ CHANGED: PostgreSQL error code for unique violation
+    if (error.code === '23505') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Email already registered' 
+      });
+    }
     console.error("Signup error:", error);
     res.status(500).json({ 
       success: false,
@@ -468,75 +459,75 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
  * Frontend calls this on app initialization to validate token
  * Prevents "redirect loop" issue by checking token validity before rendering protected pages
  */
-app.get('/api/auth/verify', verifyToken, (req, res) => {
-  // If verifyToken middleware passes, the token is valid and not expired
-  // Fetch fresh user data from database to ensure user still exists and is active
-  
-  db.get(
-    "SELECT id, name, email, role, status FROM users WHERE id = ? AND status = 'active'",
-    [req.user.id],
-    (err, user) => {
-      if (err) {
-        console.error("Verify token - DB error:", err);
-        return res.status(500).json({
-          success: false,
-          valid: false,
-          error: 'Database error during verification'
-        });
-      }
+app.get('/api/auth/verify', verifyToken, async (req, res) => {
+  try {
+    // ✅ CHANGED: pool.query
+    const result = await pool.query(
+      "SELECT id, name, email, role, status FROM users WHERE id = $1 AND status = 'active'",
+      [req.user.id]
+    );
+    const user = result.rows[0];
 
-      // User not found or deactivated
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          valid: false,
-          error: 'User account not found or deactivated'
-        });
-      }
-
-      // Token is valid and user is active
-      res.json({
-        success: true,
-        valid: true,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role
-        }
+    // User not found or deactivated
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        valid: false,
+        error: 'User account not found or deactivated'
       });
     }
-  );
+
+    // Token is valid and user is active
+    res.json({
+      success: true,
+      valid: true,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (err) {
+    console.error("Verify token - DB error:", err);
+    return res.status(500).json({
+      success: false,
+      valid: false,
+      error: 'Database error during verification'
+    });
+  }
 });
 
 /**
  * GET /api/auth/me
  * Get current authenticated user's information
  */
-app.get('/api/auth/me', verifyToken, (req, res) => {
-  db.get(
-    "SELECT id, name, email, role, status, created_at FROM users WHERE id = ?",
-    [req.user.id],
-    (err, user) => {
-      if (err) {
-        console.error("Get user error:", err);
-        return res.status(500).json({ 
-          success: false,
-          error: 'Database error' 
-        });
-      }
-      if (!user) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'User not found' 
-        });
-      }
-      res.json({
-        success: true,
-        user
+app.get('/api/auth/me', verifyToken, async (req, res) => {
+  try {
+    // ✅ CHANGED: pool.query
+    const result = await pool.query(
+      "SELECT id, name, email, role, status, created_at FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'User not found' 
       });
     }
-  );
+    res.json({
+      success: true,
+      user
+    });
+  } catch (err) {
+    console.error("Get user error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: 'Database error' 
+    });
+  }
 });
 
 /**
@@ -560,52 +551,54 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     });
   }
 
-  db.get(
-    "SELECT password FROM users WHERE id = ?",
-    [req.user.id],
-    async (err, user) => {
-      if (err || !user) {
-        return res.status(500).json({ 
-          success: false,
-          error: 'User not found' 
-        });
-      }
+  try {
+    // ✅ CHANGED: pool.query
+    const result = await pool.query(
+      "SELECT password FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const user = result.rows[0];
 
-      const isMatch = await bcrypt.compare(currentPassword, user.password);
-      if (!isMatch) {
-        return res.status(401).json({ 
-          success: false,
-          error: 'Current password is incorrect' 
-        });
-      }
-
-      const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-      db.run(
-        "UPDATE users SET password = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        [hashedPassword, req.user.id],
-        function(updateErr) {
-          if (updateErr) {
-            return res.status(500).json({ 
-              success: false,
-              error: 'Failed to update password' 
-            });
-          }
-
-          // Log password change
-          db.run(
-            "INSERT INTO activity_logs (user_id, action, ip_address) VALUES (?, ?, ?)",
-            [req.user.id, 'PASSWORD_CHANGE', req.ip]
-          );
-
-          res.json({ 
-            success: true,
-            message: 'Password changed successfully' 
-          });
-        }
-      );
+    if (!user) {
+      return res.status(500).json({ 
+        success: false,
+        error: 'User not found' 
+      });
     }
-  );
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ 
+        success: false,
+        error: 'Current password is incorrect' 
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+    // ✅ CHANGED: pool.query
+    await pool.query(
+      "UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [hashedPassword, req.user.id]
+    );
+
+    // Log password change (fire and forget)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, ip_address) VALUES ($1, $2, $3)",
+      [req.user.id, 'PASSWORD_CHANGE', req.ip]
+    ).catch(err => console.error('Log error:', err));
+
+    res.json({ 
+      success: true,
+      message: 'Password changed successfully' 
+    });
+  } catch (err) {
+    console.error("Change password error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: 'Failed to update password' 
+    });
+  }
 });
 
 /**
@@ -613,11 +606,12 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
  * Logout (client-side token removal, server-side logging)
  */
 app.post('/api/auth/logout', verifyToken, (req, res) => {
-  // Log logout
-  db.run(
-    "INSERT INTO activity_logs (user_id, action, ip_address) VALUES (?, ?, ?)",
+  // Log logout (fire and forget)
+  // ✅ CHANGED: pool.query
+  pool.query(
+    "INSERT INTO activity_logs (user_id, action, ip_address) VALUES ($1, $2, $3)",
     [req.user.id, 'LOGOUT', req.ip]
-  );
+  ).catch(err => console.error('Log error:', err));
 
   res.json({ 
     success: true,
@@ -633,22 +627,30 @@ app.post('/api/auth/logout', verifyToken, (req, res) => {
  * GET /api/products
  * Get all products with optional filtering
  */
-app.get('/api/products', verifyToken, (req, res) => {
+app.get('/api/products', verifyToken, async (req, res) => {
   const { category, search, inStock, page, limit } = req.query;
   
+  // ✅ CHANGED: Build parameterized query for PostgreSQL
   let sql = "SELECT * FROM products WHERE is_active = 1";
   const params = [];
+  let paramIndex = 0;
 
   // Category filter
   if (category && category !== 'all') {
-    sql += " AND category = ?";
+    paramIndex++;
+    sql += ` AND category = $${paramIndex}`;
     params.push(category);
   }
 
   // Search filter
+  // ✅ CHANGED: ILIKE instead of LIKE for case-insensitive search
   if (search) {
-    sql += " AND (name LIKE ? OR barcode LIKE ?)";
-    params.push(`%${search}%`, `%${search}%`);
+    paramIndex++;
+    sql += ` AND (name ILIKE $${paramIndex}`;
+    params.push(`%${search}%`);
+    paramIndex++;
+    sql += ` OR barcode ILIKE $${paramIndex})`;
+    params.push(`%${search}%`);
   }
 
   // Stock filter
@@ -663,75 +665,77 @@ app.get('/api/products', verifyToken, (req, res) => {
     const pageNum = parseInt(page) || 1;
     const limitNum = parseInt(limit) || 20;
     const offset = (pageNum - 1) * limitNum;
-    sql += ` LIMIT ${limitNum} OFFSET ${offset}`;
+    paramIndex++;
+    sql += ` LIMIT $${paramIndex}`;
+    params.push(limitNum);
+    paramIndex++;
+    sql += ` OFFSET $${paramIndex}`;
+    params.push(offset);
   }
 
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      console.error("Get products error:", err);
-      return res.status(500).json({ 
-        success: false,
-        error: err.message 
-      });
-    }
-    res.json(rows || []);
-  });
+  try {
+    const result = await pool.query(sql, params);
+    res.json(result.rows || []);
+  } catch (err) {
+    console.error("Get products error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/products/categories
  * Get all product categories
  */
-app.get('/api/products/categories', verifyToken, (req, res) => {
-  db.all(
-    "SELECT DISTINCT category FROM products WHERE is_active = 1 ORDER BY category ASC",
-    [],
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      const categories = rows.map(r => r.category);
-      res.json(categories);
-    }
-  );
+app.get('/api/products/categories', verifyToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT DISTINCT category FROM products WHERE is_active = 1 ORDER BY category ASC"
+    );
+    const categories = result.rows.map(r => r.category);
+    res.json(categories);
+  } catch (err) {
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/products/:id
  * Get single product by ID
  */
-app.get('/api/products/:id', verifyToken, (req, res) => {
+app.get('/api/products/:id', verifyToken, async (req, res) => {
   const { id } = req.params;
   
-  db.get(
-    "SELECT * FROM products WHERE id = ?",
-    [id],
-    (err, product) => {
-      if (err) {
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      if (!product) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Product not found' 
-        });
-      }
-      res.json(product);
+  try {
+    // ✅ CHANGED: $1
+    const result = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
+    const product = result.rows[0];
+
+    if (!product) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Product not found' 
+      });
     }
-  );
+    res.json(product);
+  } catch (err) {
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * POST /api/products
  * Add new product (Admin/Owner only)
  */
-app.post('/api/products', verifyToken, requireAdmin, (req, res) => {
+app.post('/api/products', verifyToken, requireAdmin, async (req, res) => {
   const { name, price, stock, category, barcode, description, image_url } = req.body;
 
   // Validation
@@ -766,48 +770,51 @@ app.post('/api/products', verifyToken, requireAdmin, (req, res) => {
     image_url: image_url ? image_url.trim() : null
   };
 
-  db.run(
-    `INSERT INTO products (name, price, stock, category, barcode, description, image_url) 
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [productData.name, productData.price, productData.stock, productData.category, 
-     productData.barcode, productData.description, productData.image_url],
-    function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE constraint')) {
-          return res.status(400).json({ 
-            success: false,
-            error: 'Product with this barcode already exists' 
-          });
-        }
-        console.error("Add product error:", err);
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
+  try {
+    // ✅ CHANGED: $1-$7 and RETURNING id
+    const result = await pool.query(
+      `INSERT INTO products (name, price, stock, category, barcode, description, image_url) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [productData.name, productData.price, productData.stock, productData.category, 
+       productData.barcode, productData.description, productData.image_url]
+    );
+
+    const newId = result.rows[0].id;
       
-      // Log activity
-      db.run(
-        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-        [req.user.id, 'CREATE', 'product', this.lastID, `Created product: ${productData.name}`]
-      );
+    // Log activity (fire and forget)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+      [req.user.id, 'CREATE', 'product', newId, `Created product: ${productData.name}`]
+    ).catch(err => console.error('Log error:', err));
       
-      res.status(201).json({ 
-        success: true,
-        message: 'Product created successfully',
-        id: this.lastID,
-        ...productData,
-        created_at: new Date().toISOString()
+    res.status(201).json({ 
+      success: true,
+      message: 'Product created successfully',
+      id: newId,
+      ...productData,
+      created_at: new Date().toISOString()
+    });
+  } catch (err) {
+    // ✅ CHANGED: PostgreSQL unique violation code
+    if (err.code === '23505') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Product with this barcode already exists' 
       });
     }
-  );
+    console.error("Add product error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * PUT /api/products/:id
  * Update existing product (Admin/Owner only)
  */
-app.put('/api/products/:id', verifyToken, requireAdmin, (req, res) => {
+app.put('/api/products/:id', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { name, price, stock, category, barcode, description, image_url, is_active } = req.body;
 
@@ -837,175 +844,163 @@ app.put('/api/products/:id', verifyToken, requireAdmin, (req, res) => {
     is_active: is_active !== undefined ? (is_active ? 1 : 0) : 1
   };
 
-  db.run(
-    `UPDATE products SET 
-      name = ?, price = ?, stock = ?, category = ?, 
-      barcode = ?, description = ?, image_url = ?, is_active = ?,
-      updated_at = CURRENT_TIMESTAMP 
-     WHERE id = ?`,
-    [productData.name, productData.price, productData.stock, productData.category,
-     productData.barcode, productData.description, productData.image_url, productData.is_active, id],
-    function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE constraint')) {
-          return res.status(400).json({ 
-            success: false,
-            error: 'Product with this barcode already exists' 
-          });
-        }
-        console.error("Update product error:", err);
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Product not found' 
-        });
-      }
+  try {
+    // ✅ CHANGED: $1-$9
+    const result = await pool.query(
+      `UPDATE products SET 
+        name = $1, price = $2, stock = $3, category = $4, 
+        barcode = $5, description = $6, image_url = $7, is_active = $8,
+        updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $9`,
+      [productData.name, productData.price, productData.stock, productData.category,
+       productData.barcode, productData.description, productData.image_url, productData.is_active, id]
+    );
 
-      // Log activity
-      db.run(
-        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-        [req.user.id, 'UPDATE', 'product', id, `Updated product: ${productData.name}`]
-      );
-
-      res.json({ 
-        success: true,
-        message: 'Product updated successfully',
-        id: Number(id)
+    // ✅ CHANGED: result.rowCount instead of this.changes
+    if (result.rowCount === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Product not found' 
       });
     }
-  );
+
+    // Log activity (fire and forget)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+      [req.user.id, 'UPDATE', 'product', id, `Updated product: ${productData.name}`]
+    ).catch(err => console.error('Log error:', err));
+
+    res.json({ 
+      success: true,
+      message: 'Product updated successfully',
+      id: Number(id)
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Product with this barcode already exists' 
+      });
+    }
+    console.error("Update product error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * PATCH /api/products/:id/stock
  * Update product stock only
  */
-app.patch('/api/products/:id/stock', verifyToken, requireAdmin, (req, res) => {
+app.patch('/api/products/:id/stock', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { stock, adjustment } = req.body;
 
-  if (stock !== undefined) {
-    // Set absolute stock value
-    db.run(
-      "UPDATE products SET stock = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      [Math.max(0, Number(stock)), id],
-      function(err) {
-        if (err) {
-          return res.status(500).json({ success: false, error: err.message });
-        }
-        if (this.changes === 0) {
-          return res.status(404).json({ success: false, error: 'Product not found' });
-        }
-        res.json({ success: true, message: 'Stock updated' });
+  try {
+    if (stock !== undefined) {
+      // Set absolute stock value
+      // ✅ CHANGED: $1, $2
+      const result = await pool.query(
+        "UPDATE products SET stock = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        [Math.max(0, Number(stock)), id]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ success: false, error: 'Product not found' });
       }
-    );
-  } else if (adjustment !== undefined) {
-    // Adjust stock by value
-    db.run(
-      "UPDATE products SET stock = MAX(0, stock + ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      [Number(adjustment), id],
-      function(err) {
-        if (err) {
-          return res.status(500).json({ success: false, error: err.message });
-        }
-        if (this.changes === 0) {
-          return res.status(404).json({ success: false, error: 'Product not found' });
-        }
-        res.json({ success: true, message: 'Stock adjusted' });
+      res.json({ success: true, message: 'Stock updated' });
+    } else if (adjustment !== undefined) {
+      // Adjust stock by value
+      // ✅ CHANGED: GREATEST instead of MAX
+      const result = await pool.query(
+        "UPDATE products SET stock = GREATEST(0, stock + $1), updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        [Number(adjustment), id]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ success: false, error: 'Product not found' });
       }
-    );
-  } else {
-    res.status(400).json({ success: false, error: 'Stock or adjustment value required' });
+      res.json({ success: true, message: 'Stock adjusted' });
+    } else {
+      res.status(400).json({ success: false, error: 'Stock or adjustment value required' });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
 /**
  * DELETE /api/products/:id
  * Delete product (Admin/Owner only)
+ * Soft delete by setting is_active = 0
  */
-app.delete('/api/products/:id', verifyToken, requireAdmin, (req, res) => {
+app.delete('/api/products/:id', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { permanent } = req.query;
   
-  if (permanent === 'true' && req.user.role === 'owner') {
-    // Permanent delete (owner only)
-    db.run(
-      "DELETE FROM products WHERE id = ?",
-      [id],
-      function(err) {
-        if (err) {
-          console.error("Delete product error:", err);
-          return res.status(500).json({ 
-            success: false,
-            error: err.message 
-          });
-        }
-        if (this.changes === 0) {
-          return res.status(404).json({ 
-            success: false,
-            error: 'Product not found' 
-          });
-        }
+  try {
+    if (permanent === 'true' && req.user.role === 'owner') {
+      // Permanent delete (owner only)
+      const result = await pool.query("DELETE FROM products WHERE id = $1", [id]);
 
-        db.run(
-          "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-          [req.user.id, 'DELETE_PERMANENT', 'product', id, `Permanently deleted product ID: ${id}`]
-        );
-
-        res.json({ 
-          success: true,
-          message: 'Product permanently deleted' 
+      if (result.rowCount === 0) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Product not found' 
         });
       }
-    );
-  } else {
-    // Soft delete
-    db.run(
-      "UPDATE products SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      [id],
-      function(err) {
-        if (err) {
-          console.error("Soft delete product error:", err);
-          return res.status(500).json({ 
-            success: false,
-            error: err.message 
-          });
-        }
-        if (this.changes === 0) {
-          return res.status(404).json({ 
-            success: false,
-            error: 'Product not found' 
-          });
-        }
 
-        db.run(
-          "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-          [req.user.id, 'DELETE', 'product', id, `Soft deleted product ID: ${id}`]
-        );
+      pool.query(
+        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+        [req.user.id, 'DELETE_PERMANENT', 'product', id, `Permanently deleted product ID: ${id}`]
+      ).catch(err => console.error('Log error:', err));
 
-        res.json({ 
-          success: true,
-          message: 'Product deleted successfully' 
+      res.json({ 
+        success: true,
+        message: 'Product permanently deleted' 
+      });
+    } else {
+      // Soft delete
+      const result = await pool.query(
+        "UPDATE products SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+        [id]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Product not found' 
         });
       }
-    );
+
+      pool.query(
+        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+        [req.user.id, 'DELETE', 'product', id, `Soft deleted product ID: ${id}`]
+      ).catch(err => console.error('Log error:', err));
+
+      res.json({ 
+        success: true,
+        message: 'Product deleted successfully' 
+      });
+    }
+  } catch (err) {
+    console.error("Delete product error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════
-// SALES ROUTES
+// SALES ROUTES (With PostgreSQL Transaction Support)
 // ═══════════════════════════════════════════════════════════════
 
 /**
  * POST /api/sales
  * Record a new sale transaction with proper transaction handling
  */
-app.post('/api/sales', verifyToken, (req, res) => {
+app.post('/api/sales', verifyToken, async (req, res) => {
   const { total_amount, items_count, items, payment_method, customer_name, customer_phone, notes } = req.body;
   const staff_id = req.user.id;
 
@@ -1044,170 +1039,124 @@ app.post('/api/sales', verifyToken, (req, res) => {
   const itemCount = items_count || items.reduce((sum, item) => sum + item.quantity, 0);
   const paymentMethodValue = payment_method || 'cash';
 
-  // Stock validation
-  const stockCheckPromises = items.map(item => {
-    return new Promise((resolve, reject) => {
-      db.get(
-        "SELECT id, name, stock FROM products WHERE id = ? AND is_active = 1",
-        [item.product_id],
-        (err, product) => {
-          if (err) {
-            reject({ error: 'Database error', product_id: item.product_id });
-          } else if (!product) {
-            reject({ error: `Product not found`, product_id: item.product_id });
-          } else if (product.stock < item.quantity) {
-            reject({ 
-              error: `Insufficient stock for "${product.name}"`, 
-              product_id: item.product_id,
-              available: product.stock,
-              requested: item.quantity 
-            });
-          } else {
-            resolve(product);
-          }
-        }
+  // ✅ CHANGED: PostgreSQL transaction using client from pool
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Validate stock for all items first
+    for (const item of items) {
+      const stockCheck = await client.query(
+        "SELECT id, name, stock FROM products WHERE id = $1 AND is_active = 1",
+        [item.product_id]
       );
-    });
-  });
 
-  Promise.all(stockCheckPromises)
-    .then(() => {
-      // All stock checks passed
-      db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
+      if (stockCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          success: false,
+          error: `Product ${item.product_id} not found` 
+        });
+      }
 
-        // Create order
-        db.run(
-          `INSERT INTO orders (total_amount, items_count, staff_id, status, payment_method, customer_name, customer_phone, notes) 
-           VALUES (?, ?, ?, 'completed', ?, ?, ?, ?)`,
-          [total_amount, itemCount, staff_id, paymentMethodValue, customer_name || null, customer_phone || null, notes || null],
-          function(orderErr) {
-            if (orderErr) {
-              db.run("ROLLBACK");
-              console.error("Create order error:", orderErr);
-              return res.status(500).json({ 
-                success: false,
-                error: 'Failed to create order' 
-              });
-            }
-
-            const orderId = this.lastID;
-            let itemsProcessed = 0;
-            let hasError = false;
-
-            // Process each item
-            items.forEach((item) => {
-              if (hasError) return;
-
-              // Update stock
-              db.run(
-                "UPDATE products SET stock = stock - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                [item.quantity, item.product_id],
-                function(stockErr) {
-                  if (stockErr || hasError) {
-                    if (!hasError) {
-                      hasError = true;
-                      db.run("ROLLBACK");
-                      return res.status(500).json({ 
-                        success: false,
-                        error: 'Stock update failed' 
-                      });
-                    }
-                    return;
-                  }
-
-                  // Insert order item
-                  db.run(
-                    "INSERT INTO order_items (order_id, product_id, quantity, price_at_time) VALUES (?, ?, ?, ?)",
-                    [orderId, item.product_id, item.quantity, item.price],
-                    function(itemErr) {
-                      if (itemErr || hasError) {
-                        if (!hasError) {
-                          hasError = true;
-                          db.run("ROLLBACK");
-                          return res.status(500).json({ 
-                            success: false,
-                            error: 'Order item creation failed' 
-                          });
-                        }
-                        return;
-                      }
-
-                      itemsProcessed++;
-
-                      // All items processed
-                      if (itemsProcessed === items.length && !hasError) {
-                        db.run("COMMIT", function(commitErr) {
-                          if (commitErr) {
-                            db.run("ROLLBACK");
-                            return res.status(500).json({ 
-                              success: false,
-                              error: 'Transaction commit failed' 
-                            });
-                          }
-
-                          // Log the sale
-                          db.run(
-                            "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-                            [staff_id, 'SALE', 'order', orderId, `Sale completed: Br ${total_amount}`]
-                          );
-
-                          // Success response
-                          res.status(201).json({
-                            success: true,
-                            message: 'Sale completed successfully',
-                            orderId,
-                            receiptNumber: `ETH-${orderId.toString().padStart(6, '0')}`,
-                            total: total_amount,
-                            itemsCount: itemCount,
-                            paymentMethod: paymentMethodValue,
-                            timestamp: new Date().toISOString()
-                          });
-                        });
-                      }
-                    }
-                  );
-                }
-              );
-            });
+      const product = stockCheck.rows[0];
+      if (product.stock < item.quantity) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          success: false,
+          error: `Insufficient stock for "${product.name}". Available: ${product.stock}, Requested: ${item.quantity}`,
+          details: {
+            product_id: item.product_id,
+            available: product.stock,
+            requested: item.quantity
           }
-        );
-      });
-    })
-    .catch((stockError) => {
-      // Stock validation failed
-      return res.status(400).json({
-        success: false,
-        error: stockError.error,
-        details: stockError
-      });
+        });
+      }
+    }
+
+    // Create order
+    // ✅ CHANGED: RETURNING id
+    const orderResult = await client.query(
+      `INSERT INTO orders (total_amount, items_count, staff_id, status, payment_method, customer_name, customer_phone, notes) 
+       VALUES ($1, $2, $3, 'completed', $4, $5, $6, $7) RETURNING id`,
+      [total_amount, itemCount, staff_id, paymentMethodValue, customer_name || null, customer_phone || null, notes || null]
+    );
+
+    const orderId = orderResult.rows[0].id;
+
+    // Process each item
+    for (const item of items) {
+      // Update stock
+      await client.query(
+        "UPDATE products SET stock = stock - $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        [item.quantity, item.product_id]
+      );
+
+      // Insert order item
+      await client.query(
+        "INSERT INTO order_items (order_id, product_id, quantity, price_at_time) VALUES ($1, $2, $3, $4)",
+        [orderId, item.product_id, item.quantity, item.price]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Log the sale (fire and forget - outside transaction)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+      [staff_id, 'SALE', 'order', orderId, `Sale completed: Br ${total_amount}`]
+    ).catch(err => console.error('Log error:', err));
+
+    // Success response
+    res.status(201).json({
+      success: true,
+      message: 'Sale completed successfully',
+      orderId,
+      receiptNumber: `ETH-${orderId.toString().padStart(6, '0')}`,
+      total: total_amount,
+      itemsCount: itemCount,
+      paymentMethod: paymentMethodValue,
+      timestamp: new Date().toISOString()
     });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("Sale transaction error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: 'Sale transaction failed: ' + err.message 
+    });
+  } finally {
+    client.release();
+  }
 });
 
 /**
  * GET /api/sales/history
  * Get sales history with optional date range filter
  */
-app.get('/api/sales/history', verifyToken, (req, res) => {
+app.get('/api/sales/history', verifyToken, async (req, res) => {
   const { range, limit, page, staff_id, status } = req.query;
 
+  // ✅ CHANGED: PostgreSQL date functions
   let dateFilter = "1=1";
   
   switch(range) {
     case 'today':
-      dateFilter = "date(o.created_at) = date('now', 'localtime')";
+      dateFilter = "DATE(o.created_at) = CURRENT_DATE";
       break;
     case 'yesterday':
-      dateFilter = "date(o.created_at) = date('now', '-1 day', 'localtime')";
+      dateFilter = "DATE(o.created_at) = CURRENT_DATE - INTERVAL '1 day'";
       break;
     case 'week':
-      dateFilter = "o.created_at >= date('now', '-7 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '7 days'";
       break;
     case 'month':
-      dateFilter = "o.created_at >= date('now', '-30 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '30 days'";
       break;
     case 'year':
-      dateFilter = "o.created_at >= date('now', '-365 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '365 days'";
       break;
     case 'all':
     default:
@@ -1215,16 +1164,20 @@ app.get('/api/sales/history', verifyToken, (req, res) => {
       break;
   }
 
+  // ✅ CHANGED: Dynamic parameterized query
   let additionalFilters = "";
   const params = [];
+  let paramIndex = 0;
 
   if (staff_id) {
-    additionalFilters += " AND o.staff_id = ?";
+    paramIndex++;
+    additionalFilters += ` AND o.staff_id = $${paramIndex}`;
     params.push(staff_id);
   }
 
   if (status) {
-    additionalFilters += " AND o.status = ?";
+    paramIndex++;
+    additionalFilters += ` AND o.status = $${paramIndex}`;
     params.push(status);
   }
 
@@ -1232,122 +1185,110 @@ app.get('/api/sales/history', verifyToken, (req, res) => {
   const pageNum = Number(page) || 1;
   const offset = (pageNum - 1) * recordLimit;
 
-  // Get total count
-  db.get(
-    `SELECT COUNT(*) as total FROM orders o WHERE ${dateFilter}${additionalFilters}`,
-    params,
-    (countErr, countRow) => {
-      if (countErr) {
-        console.error("Count sales error:", countErr);
-        return res.status(500).json({ 
-          success: false,
-          error: countErr.message 
-        });
+  try {
+    // Get total count
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM orders o WHERE ${dateFilter}${additionalFilters}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0]?.total || 0);
+
+    // Get paginated results
+    paramIndex++;
+    const limitParamNum = paramIndex;
+    paramIndex++;
+    const offsetParamNum = paramIndex;
+
+    const dataResult = await pool.query(
+      `SELECT o.*, u.name as staff_name 
+       FROM orders o 
+       LEFT JOIN users u ON o.staff_id = u.id 
+       WHERE ${dateFilter}${additionalFilters}
+       ORDER BY o.created_at DESC 
+       LIMIT $${limitParamNum} OFFSET $${offsetParamNum}`,
+      [...params, recordLimit, offset]
+    );
+
+    // Add receipt numbers
+    const salesWithReceipts = (dataResult.rows || []).map(sale => ({
+      ...sale,
+      receiptNumber: `ETH-${sale.id.toString().padStart(6, '0')}`
+    }));
+
+    res.json({
+      success: true,
+      data: salesWithReceipts,
+      pagination: {
+        page: pageNum,
+        limit: recordLimit,
+        total,
+        totalPages: Math.ceil(total / recordLimit)
       }
-
-      const total = countRow?.total || 0;
-
-      // Get paginated results
-      db.all(
-        `SELECT o.*, u.name as staff_name 
-         FROM orders o 
-         LEFT JOIN users u ON o.staff_id = u.id 
-         WHERE ${dateFilter}${additionalFilters}
-         ORDER BY o.created_at DESC 
-         LIMIT ? OFFSET ?`,
-        [...params, recordLimit, offset],
-        (err, rows) => {
-          if (err) {
-            console.error("Sales history error:", err);
-            return res.status(500).json({ 
-              success: false,
-              error: err.message 
-            });
-          }
-
-          // Add receipt numbers
-          const salesWithReceipts = (rows || []).map(sale => ({
-            ...sale,
-            receiptNumber: `ETH-${sale.id.toString().padStart(6, '0')}`
-          }));
-
-          res.json({
-            success: true,
-            data: salesWithReceipts,
-            pagination: {
-              page: pageNum,
-              limit: recordLimit,
-              total,
-              totalPages: Math.ceil(total / recordLimit)
-            }
-          });
-        }
-      );
-    }
-  );
+    });
+  } catch (err) {
+    console.error("Sales history error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/sales/:id
  * Get single sale with items
  */
-app.get('/api/sales/:id', verifyToken, (req, res) => {
+app.get('/api/sales/:id', verifyToken, async (req, res) => {
   const { id } = req.params;
 
-  db.get(
-    `SELECT o.*, u.name as staff_name 
-     FROM orders o 
-     LEFT JOIN users u ON o.staff_id = u.id 
-     WHERE o.id = ?`,
-    [id],
-    (err, order) => {
-      if (err) {
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      if (!order) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Order not found' 
-        });
-      }
+  try {
+    // ✅ CHANGED: $1
+    const orderResult = await pool.query(
+      `SELECT o.*, u.name as staff_name 
+       FROM orders o 
+       LEFT JOIN users u ON o.staff_id = u.id 
+       WHERE o.id = $1`,
+      [id]
+    );
+    const order = orderResult.rows[0];
 
-      // Get order items
-      db.all(
-        `SELECT oi.*, p.name as product_name, p.category 
-         FROM order_items oi 
-         LEFT JOIN products p ON oi.product_id = p.id 
-         WHERE oi.order_id = ?`,
-        [id],
-        (itemsErr, items) => {
-          if (itemsErr) {
-            return res.status(500).json({ 
-              success: false,
-              error: itemsErr.message 
-            });
-          }
-          
-          res.json({
-            success: true,
-            order: {
-              ...order,
-              receiptNumber: `ETH-${order.id.toString().padStart(6, '0')}`,
-              items: items || []
-            }
-          });
-        }
-      );
+    if (!order) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Order not found' 
+      });
     }
-  );
+
+    // Get order items
+    const itemsResult = await pool.query(
+      `SELECT oi.*, p.name as product_name, p.category 
+       FROM order_items oi 
+       LEFT JOIN products p ON oi.product_id = p.id 
+       WHERE oi.order_id = $1`,
+      [id]
+    );
+    
+    res.json({
+      success: true,
+      order: {
+        ...order,
+        receiptNumber: `ETH-${order.id.toString().padStart(6, '0')}`,
+        items: itemsResult.rows || []
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * PUT /api/sales/:id/status
  * Update sale status (for refunds/cancellations)
  */
-app.put('/api/sales/:id/status', verifyToken, requireAdmin, (req, res) => {
+app.put('/api/sales/:id/status', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { status, reason } = req.body;
 
@@ -1359,9 +1300,12 @@ app.put('/api/sales/:id/status', verifyToken, requireAdmin, (req, res) => {
     });
   }
 
-  // Get current order
-  db.get("SELECT * FROM orders WHERE id = ?", [id], (err, order) => {
-    if (err || !order) {
+  try {
+    // Get current order
+    const orderResult = await pool.query("SELECT * FROM orders WHERE id = $1", [id]);
+    const order = orderResult.rows[0];
+
+    if (!order) {
       return res.status(404).json({ 
         success: false,
         error: 'Order not found' 
@@ -1370,79 +1314,70 @@ app.put('/api/sales/:id/status', verifyToken, requireAdmin, (req, res) => {
 
     // If refunding or cancelling, restore stock
     if ((status === 'refunded' || status === 'cancelled') && order.status === 'completed') {
-      db.all(
-        "SELECT * FROM order_items WHERE order_id = ?",
-        [id],
-        (itemsErr, items) => {
-          if (itemsErr) {
-            return res.status(500).json({ 
-              success: false,
-              error: 'Failed to get order items' 
-            });
-          }
+      // ✅ CHANGED: PostgreSQL transaction
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
 
-          db.serialize(() => {
-            db.run("BEGIN TRANSACTION");
+        // Get order items
+        const itemsResult = await client.query(
+          "SELECT * FROM order_items WHERE order_id = $1",
+          [id]
+        );
 
-            // Restore stock for each item
-            items.forEach(item => {
-              db.run(
-                "UPDATE products SET stock = stock + ? WHERE id = ?",
-                [item.quantity, item.product_id]
-              );
-            });
-
-            // Update order status
-            db.run(
-              "UPDATE orders SET status = ?, notes = COALESCE(notes || ' | ', '') || ? WHERE id = ?",
-              [status, `${status.toUpperCase()}: ${reason || 'No reason provided'}`, id],
-              function(updateErr) {
-                if (updateErr) {
-                  db.run("ROLLBACK");
-                  return res.status(500).json({ 
-                    success: false,
-                    error: 'Failed to update order' 
-                  });
-                }
-
-                db.run("COMMIT");
-
-                // Log activity
-                db.run(
-                  "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-                  [req.user.id, status.toUpperCase(), 'order', id, reason || 'Status updated']
-                );
-
-                res.json({ 
-                  success: true,
-                  message: `Order ${status} successfully` 
-                });
-              }
-            );
-          });
+        // Restore stock for each item
+        for (const item of itemsResult.rows) {
+          await client.query(
+            "UPDATE products SET stock = stock + $1 WHERE id = $2",
+            [item.quantity, item.product_id]
+          );
         }
-      );
+
+        // Update order status
+        await client.query(
+          "UPDATE orders SET status = $1, notes = COALESCE(notes || ' | ', '') || $2 WHERE id = $3",
+          [status, `${status.toUpperCase()}: ${reason || 'No reason provided'}`, id]
+        );
+
+        await client.query('COMMIT');
+
+        // Log activity (fire and forget)
+        pool.query(
+          "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+          [req.user.id, status.toUpperCase(), 'order', id, reason || 'Status updated']
+        ).catch(err => console.error('Log error:', err));
+
+        res.json({ 
+          success: true,
+          message: `Order ${status} successfully` 
+        });
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        return res.status(500).json({ 
+          success: false,
+          error: 'Failed to update order' 
+        });
+      } finally {
+        client.release();
+      }
     } else {
       // Simple status update without stock adjustment
-      db.run(
-        "UPDATE orders SET status = ? WHERE id = ?",
-        [status, id],
-        function(updateErr) {
-          if (updateErr) {
-            return res.status(500).json({ 
-              success: false,
-              error: 'Failed to update order' 
-            });
-          }
-
-          res.json({ 
-            success: true,
-            message: `Order status updated to ${status}` 
-          });
-        }
+      await pool.query(
+        "UPDATE orders SET status = $1 WHERE id = $2",
+        [status, id]
       );
+
+      res.json({ 
+        success: true,
+        message: `Order status updated to ${status}` 
+      });
     }
-  });
+  } catch (err) {
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1453,81 +1388,86 @@ app.put('/api/sales/:id/status', verifyToken, requireAdmin, (req, res) => {
  * GET /api/staff
  * Get all staff members
  */
-app.get('/api/staff', verifyToken, (req, res) => {
+app.get('/api/staff', verifyToken, async (req, res) => {
   const { status, role } = req.query;
   
+  // ✅ CHANGED: Dynamic parameterized query
   let sql = "SELECT id, name, email, role, status, created_at FROM users WHERE 1=1";
   const params = [];
+  let paramIndex = 0;
 
   if (status) {
-    sql += " AND status = ?";
+    paramIndex++;
+    sql += ` AND status = $${paramIndex}`;
     params.push(status);
   }
 
   if (role) {
-    sql += " AND role = ?";
+    paramIndex++;
+    sql += ` AND role = $${paramIndex}`;
     params.push(role);
   }
 
   sql += " ORDER BY name ASC";
 
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      console.error("Get staff error:", err);
-      return res.status(500).json({ 
-        success: false,
-        error: err.message 
-      });
-    }
-    res.json(rows || []);
-  });
+  try {
+    const result = await pool.query(sql, params);
+    res.json(result.rows || []);
+  } catch (err) {
+    console.error("Get staff error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/staff/:id
  * Get single staff member with stats
  */
-app.get('/api/staff/:id', verifyToken, (req, res) => {
+app.get('/api/staff/:id', verifyToken, async (req, res) => {
   const { id } = req.params;
 
-  db.get(
-    "SELECT id, name, email, role, status, created_at FROM users WHERE id = ?",
-    [id],
-    (err, user) => {
-      if (err) {
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      if (!user) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Staff member not found' 
-        });
-      }
+  try {
+    const userResult = await pool.query(
+      "SELECT id, name, email, role, status, created_at FROM users WHERE id = $1",
+      [id]
+    );
+    const user = userResult.rows[0];
 
-      // Get staff stats
-      db.get(
-        `SELECT 
-          COUNT(*) as total_sales,
-          COALESCE(SUM(total_amount), 0) as total_revenue,
-          COUNT(CASE WHEN date(created_at) = date('now', 'localtime') THEN 1 END) as today_sales
-         FROM orders 
-         WHERE staff_id = ? AND status = 'completed'`,
-        [id],
-        (statsErr, stats) => {
-          res.json({
-            success: true,
-            staff: {
-              ...user,
-              stats: stats || { total_sales: 0, total_revenue: 0, today_sales: 0 }
-            }
-          });
-        }
-      );
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Staff member not found' 
+      });
     }
-  );
+
+    // Get staff stats
+    // ✅ CHANGED: CURRENT_DATE instead of date('now', 'localtime')
+    const statsResult = await pool.query(
+      `SELECT 
+        COUNT(*) as total_sales,
+        COALESCE(SUM(total_amount), 0) as total_revenue,
+        COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE THEN 1 END) as today_sales
+       FROM orders 
+       WHERE staff_id = $1 AND status = 'completed'`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      staff: {
+        ...user,
+        stats: statsResult.rows[0] || { total_sales: 0, total_revenue: 0, today_sales: 0 }
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
@@ -1593,45 +1533,40 @@ app.post('/api/staff', verifyToken, requireAdmin, async (req, res) => {
     const trimmedName = name.trim();
     const normalizedEmail = email.toLowerCase().trim();
 
-    db.run(
-      "INSERT INTO users (name, email, password, role, status) VALUES (?, ?, ?, ?, 'active')",
-      [trimmedName, normalizedEmail, hashedPassword, normalizedRole],
-      function(err) {
-        if (err) {
-          if (err.message.includes('UNIQUE constraint')) {
-            return res.status(400).json({ 
-              success: false,
-              error: 'Email already exists' 
-            });
-          }
-          console.error("Add staff error:", err);
-          return res.status(500).json({ 
-            success: false,
-            error: err.message 
-          });
-        }
-
-        // Log activity
-        db.run(
-          "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-          [req.user.id, 'CREATE', 'user', this.lastID, `Created staff: ${trimmedName} (${normalizedRole})`]
-        );
-        
-        res.status(201).json({ 
-          success: true,
-          message: 'Staff member created successfully',
-          staff: {
-            id: this.lastID,
-            name: trimmedName,
-            email: normalizedEmail,
-            role: normalizedRole,
-            status: 'active',
-            created_at: new Date().toISOString()
-          }
-        });
-      }
+    // ✅ CHANGED: RETURNING id
+    const result = await pool.query(
+      "INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, 'active') RETURNING id",
+      [trimmedName, normalizedEmail, hashedPassword, normalizedRole]
     );
+
+    const newId = result.rows[0].id;
+
+    // Log activity (fire and forget)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+      [req.user.id, 'CREATE', 'user', newId, `Created staff: ${trimmedName} (${normalizedRole})`]
+    ).catch(err => console.error('Log error:', err));
+    
+    res.status(201).json({ 
+      success: true,
+      message: 'Staff member created successfully',
+      staff: {
+        id: newId,
+        name: trimmedName,
+        email: normalizedEmail,
+        role: normalizedRole,
+        status: 'active',
+        created_at: new Date().toISOString()
+      }
+    });
   } catch (error) {
+    // ✅ CHANGED: PostgreSQL unique violation
+    if (error.code === '23505') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Email already exists' 
+      });
+    }
     console.error("Staff creation error:", error);
     res.status(500).json({ 
       success: false,
@@ -1675,29 +1610,35 @@ app.put('/api/staff/:id', verifyToken, requireAdmin, async (req, res) => {
     });
   }
 
-  // Build update query dynamically
+  // ✅ CHANGED: Build parameterized update query for PostgreSQL
   const updates = [];
   const values = [];
+  let paramIndex = 0;
 
   if (name) {
-    updates.push('name = ?');
+    paramIndex++;
+    updates.push(`name = $${paramIndex}`);
     values.push(name.trim());
   }
   if (email) {
-    updates.push('email = ?');
+    paramIndex++;
+    updates.push(`email = $${paramIndex}`);
     values.push(email.toLowerCase().trim());
   }
   if (normalizedRole) {
-    updates.push('role = ?');
+    paramIndex++;
+    updates.push(`role = $${paramIndex}`);
     values.push(normalizedRole);
   }
   if (status) {
-    updates.push('status = ?');
+    paramIndex++;
+    updates.push(`status = $${paramIndex}`);
     values.push(status);
   }
   if (password && password.length >= 6) {
     const hashedPassword = await bcrypt.hash(password, 12);
-    updates.push('password = ?');
+    paramIndex++;
+    updates.push(`password = $${paramIndex}`);
     values.push(hashedPassword);
   }
 
@@ -1709,51 +1650,52 @@ app.put('/api/staff/:id', verifyToken, requireAdmin, async (req, res) => {
   }
 
   updates.push('updated_at = CURRENT_TIMESTAMP');
+  paramIndex++;
   values.push(id);
 
-  db.run(
-    `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
-    values,
-    function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE constraint')) {
-          return res.status(400).json({ 
-            success: false,
-            error: 'Email already exists' 
-          });
-        }
-        console.error("Update staff error:", err);
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Staff member not found' 
-        });
-      }
+  try {
+    const result = await pool.query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+      values
+    );
 
-      // Log activity
-      db.run(
-        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-        [req.user.id, 'UPDATE', 'user', id, `Updated staff ID: ${id}`]
-      );
-
-      res.json({ 
-        success: true,
-        message: 'Staff member updated successfully' 
+    if (result.rowCount === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Staff member not found' 
       });
     }
-  );
+
+    // Log activity (fire and forget)
+    pool.query(
+      "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+      [req.user.id, 'UPDATE', 'user', id, `Updated staff ID: ${id}`]
+    ).catch(err => console.error('Log error:', err));
+
+    res.json({ 
+      success: true,
+      message: 'Staff member updated successfully' 
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Email already exists' 
+      });
+    }
+    console.error("Update staff error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * DELETE /api/staff/:id
  * Delete staff member (Owner only)
  */
-app.delete('/api/staff/:id', verifyToken, requireOwner, (req, res) => {
+app.delete('/api/staff/:id', verifyToken, requireOwner, async (req, res) => {
   const { id } = req.params;
   const { permanent } = req.query;
 
@@ -1765,157 +1707,162 @@ app.delete('/api/staff/:id', verifyToken, requireOwner, (req, res) => {
     });
   }
 
-  if (permanent === 'true') {
-    // Check if user has orders
-    db.get(
-      "SELECT COUNT(*) as count FROM orders WHERE staff_id = ?",
-      [id],
-      (countErr, countRow) => {
-        if (countErr) {
-          return res.status(500).json({ success: false, error: countErr.message });
-        }
+  try {
+    if (permanent === 'true') {
+      // Check if user has orders
+      const countResult = await pool.query(
+        "SELECT COUNT(*) as count FROM orders WHERE staff_id = $1",
+        [id]
+      );
 
-        if (countRow.count > 0) {
-          return res.status(400).json({
-            success: false,
-            error: `Cannot permanently delete. User has ${countRow.count} orders. Deactivate instead.`
-          });
-        }
-
-        db.run("DELETE FROM users WHERE id = ?", [id], function(err) {
-          if (err) {
-            return res.status(500).json({ success: false, error: err.message });
-          }
-          if (this.changes === 0) {
-            return res.status(404).json({ success: false, error: 'Staff member not found' });
-          }
-
-          db.run(
-            "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-            [req.user.id, 'DELETE_PERMANENT', 'user', id, `Permanently deleted user ID: ${id}`]
-          );
-
-          res.json({ success: true, message: 'Staff member permanently deleted' });
+      if (parseInt(countResult.rows[0].count) > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot permanently delete. User has ${countResult.rows[0].count} orders. Deactivate instead.`
         });
       }
-    );
-  } else {
-    // Soft delete (deactivate)
-    db.run(
-      "UPDATE users SET status = 'inactive', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      [id],
-      function(err) {
-        if (err) {
-          console.error("Delete staff error:", err);
-          return res.status(500).json({ 
-            success: false,
-            error: err.message 
-          });
-        }
-        if (this.changes === 0) {
-          return res.status(404).json({ 
-            success: false,
-            error: 'Staff member not found' 
-          });
-        }
 
-        db.run(
-          "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)",
-          [req.user.id, 'DEACTIVATE', 'user', id, `Deactivated user ID: ${id}`]
-        );
+      const result = await pool.query("DELETE FROM users WHERE id = $1", [id]);
+      if (result.rowCount === 0) {
+        return res.status(404).json({ success: false, error: 'Staff member not found' });
+      }
 
-        res.json({ 
-          success: true,
-          message: 'Staff member deactivated successfully' 
+      pool.query(
+        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+        [req.user.id, 'DELETE_PERMANENT', 'user', id, `Permanently deleted user ID: ${id}`]
+      ).catch(err => console.error('Log error:', err));
+
+      res.json({ success: true, message: 'Staff member permanently deleted' });
+    } else {
+      // Soft delete (deactivate)
+      const result = await pool.query(
+        "UPDATE users SET status = 'inactive', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+        [id]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Staff member not found' 
         });
       }
-    );
+
+      pool.query(
+        "INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details) VALUES ($1, $2, $3, $4, $5)",
+        [req.user.id, 'DEACTIVATE', 'user', id, `Deactivated user ID: ${id}`]
+      ).catch(err => console.error('Log error:', err));
+
+      res.json({ 
+        success: true,
+        message: 'Staff member deactivated successfully' 
+      });
+    }
+  } catch (err) {
+    console.error("Delete staff error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
   }
 });
-// ═══════════════════════════════════════════
-// COMMENTS ROUTES
-// ═══════════════════════════════════════════
 
-// GET all comments
-app.get('/api/comments', verifyToken, (req, res) => {
-  db.all(
-    "SELECT * FROM comments ORDER BY created_at DESC",
-    [],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ success: true, data: rows || [] });
-    }
-  );
+// ═══════════════════════════════════════════════════════════════
+// COMMENTS ROUTES
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/comments
+ * Get all comments
+ */
+app.get('/api/comments', verifyToken, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM comments ORDER BY created_at DESC");
+    res.json({ success: true, data: result.rows || [] });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
-// POST new comment
-app.post('/api/comments', verifyToken, (req, res) => {
+/**
+ * POST /api/comments
+ * Add new comment
+ */
+app.post('/api/comments', verifyToken, async (req, res) => {
   const { customer_name, message, type, rating, status } = req.body;
 
   if (!message || message.trim() === '') {
     return res.status(400).json({ error: 'Message is required' });
   }
 
-  db.run(
-    `INSERT INTO comments 
-     (customer_name, message, type, rating, status, created_by) 
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [
-      customer_name || 'Anonymous',
-      message.trim(),
-      type || 'feedback',
-      rating || 5,
-      status || 'pending',
-      req.user.id
-    ],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({
-        success: true,
-        comment: {
-          id: this.lastID,
-          customer_name: customer_name || 'Anonymous',
-          message: message.trim(),
-          type: type || 'feedback',
-          rating: rating || 5,
-          status: status || 'pending',
-          created_at: new Date().toISOString()
-        }
-      });
-    }
-  );
+  try {
+    // ✅ CHANGED: RETURNING id
+    const result = await pool.query(
+      `INSERT INTO comments 
+       (customer_name, message, type, rating, status, created_by) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [
+        customer_name || 'Anonymous',
+        message.trim(),
+        type || 'feedback',
+        rating || 5,
+        status || 'pending',
+        req.user.id
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      comment: {
+        id: result.rows[0].id,
+        customer_name: customer_name || 'Anonymous',
+        message: message.trim(),
+        type: type || 'feedback',
+        rating: rating || 5,
+        status: status || 'pending',
+        created_at: new Date().toISOString()
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
-// PUT update comment status
-app.put('/api/comments/:id', verifyToken, requireAdmin, (req, res) => {
+/**
+ * PUT /api/comments/:id
+ * Update comment status
+ */
+app.put('/api/comments/:id', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
-  db.run(
-    "UPDATE comments SET status = ? WHERE id = ?",
-    [status, id],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      if (this.changes === 0) return res.status(404).json({ error: 'Comment not found' });
-      res.json({ success: true, message: 'Status updated' });
-    }
-  );
+  try {
+    const result = await pool.query(
+      "UPDATE comments SET status = $1 WHERE id = $2",
+      [status, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Comment not found' });
+    res.json({ success: true, message: 'Status updated' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
-// DELETE comment
-app.delete('/api/comments/:id', verifyToken, requireAdmin, (req, res) => {
+/**
+ * DELETE /api/comments/:id
+ * Delete comment
+ */
+app.delete('/api/comments/:id', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
 
-  db.run(
-    "DELETE FROM comments WHERE id = ?",
-    [id],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      if (this.changes === 0) return res.status(404).json({ error: 'Comment not found' });
-      res.json({ success: true, message: 'Comment deleted' });
-    }
-  );
+  try {
+    const result = await pool.query("DELETE FROM comments WHERE id = $1", [id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Comment not found' });
+    res.json({ success: true, message: 'Comment deleted' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
+
 // ═══════════════════════════════════════════════════════════════
 // ANALYTICS ROUTES
 // ═══════════════════════════════════════════════════════════════
@@ -1924,140 +1871,124 @@ app.delete('/api/comments/:id', verifyToken, requireAdmin, (req, res) => {
  * GET /api/analytics/dashboard
  * Get comprehensive dashboard statistics
  */
-app.get('/api/analytics/dashboard', verifyToken, (req, res) => {
-  const queries = {
-    todayStats: `
-      SELECT 
-        COALESCE(SUM(total_amount), 0) as revenue,
-        COUNT(*) as orders,
-        COALESCE(AVG(total_amount), 0) as avg_order
-      FROM orders 
-      WHERE date(created_at) = date('now', 'localtime') 
-      AND status = 'completed'
-    `,
-    yesterdayStats: `
-      SELECT 
-        COALESCE(SUM(total_amount), 0) as revenue,
-        COUNT(*) as orders
-      FROM orders 
-      WHERE date(created_at) = date('now', '-1 day', 'localtime')
-      AND status = 'completed'
-    `,
-    weekStats: `
-      SELECT 
-        COALESCE(SUM(total_amount), 0) as revenue,
-        COUNT(*) as orders
-      FROM orders 
-      WHERE created_at >= date('now', '-7 days')
-      AND status = 'completed'
-    `,
-    monthStats: `
-      SELECT 
-        COALESCE(SUM(total_amount), 0) as revenue,
-        COUNT(*) as orders
-      FROM orders 
-      WHERE created_at >= date('now', '-30 days')
-      AND status = 'completed'
-    `,
-    staffCount: `
-      SELECT 
-        COUNT(*) as total,
-        COUNT(CASE WHEN status = 'active' THEN 1 END) as active
-      FROM users
-    `,
-    productStats: `
-      SELECT 
-        COUNT(*) as total,
-        COUNT(CASE WHEN stock > 0 THEN 1 END) as in_stock,
-        COUNT(CASE WHEN stock <= 10 AND stock > 0 THEN 1 END) as low_stock,
-        COUNT(CASE WHEN stock = 0 THEN 1 END) as out_of_stock
-      FROM products 
-      WHERE is_active = 1
-    `
-  };
+app.get('/api/analytics/dashboard', verifyToken, async (req, res) => {
+  try {
+    // ✅ CHANGED: All date functions to PostgreSQL equivalents
+    // Run all queries in parallel for speed
+    const [todayRes, yesterdayRes, weekRes, monthRes, staffRes, productRes] = await Promise.all([
+      pool.query(`
+        SELECT 
+          COALESCE(SUM(total_amount), 0) as revenue,
+          COUNT(*) as orders,
+          COALESCE(AVG(total_amount), 0) as avg_order
+        FROM orders 
+        WHERE DATE(created_at) = CURRENT_DATE 
+        AND status = 'completed'
+      `),
+      pool.query(`
+        SELECT 
+          COALESCE(SUM(total_amount), 0) as revenue,
+          COUNT(*) as orders
+        FROM orders 
+        WHERE DATE(created_at) = CURRENT_DATE - INTERVAL '1 day'
+        AND status = 'completed'
+      `),
+      pool.query(`
+        SELECT 
+          COALESCE(SUM(total_amount), 0) as revenue,
+          COUNT(*) as orders
+        FROM orders 
+        WHERE created_at >= NOW() - INTERVAL '7 days'
+        AND status = 'completed'
+      `),
+      pool.query(`
+        SELECT 
+          COALESCE(SUM(total_amount), 0) as revenue,
+          COUNT(*) as orders
+        FROM orders 
+        WHERE created_at >= NOW() - INTERVAL '30 days'
+        AND status = 'completed'
+      `),
+      pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(CASE WHEN status = 'active' THEN 1 END) as active
+        FROM users
+      `),
+      pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(CASE WHEN stock > 0 THEN 1 END) as in_stock,
+          COUNT(CASE WHEN stock <= 10 AND stock > 0 THEN 1 END) as low_stock,
+          COUNT(CASE WHEN stock = 0 THEN 1 END) as out_of_stock
+        FROM products 
+        WHERE is_active = 1
+      `)
+    ]);
 
-  const results = {};
-  let completed = 0;
-  const totalQueries = Object.keys(queries).length;
+    // Calculate changes
+    const todayRev = parseFloat(todayRes.rows[0]?.revenue) || 0;
+    const yestRev = parseFloat(yesterdayRes.rows[0]?.revenue) || 0;
+    const todayOrders = parseInt(todayRes.rows[0]?.orders) || 0;
+    const yestOrders = parseInt(yesterdayRes.rows[0]?.orders) || 0;
 
-  Object.entries(queries).forEach(([key, sql]) => {
-    db.get(sql, [], (err, row) => {
-      if (err) {
-        console.error(`Dashboard query error (${key}):`, err);
-        results[key] = null;
-      } else {
-        results[key] = row;
-      }
+    let revChange = 0;
+    if (yestRev === 0 && todayRev > 0) revChange = 100;
+    else if (yestRev > 0) revChange = ((todayRev - yestRev) / yestRev) * 100;
 
-      completed++;
-      if (completed === totalQueries) {
-        // Calculate changes
-        const todayRev = results.todayStats?.revenue || 0;
-        const yestRev = results.yesterdayStats?.revenue || 0;
-        const todayOrders = results.todayStats?.orders || 0;
-        const yestOrders = results.yesterdayStats?.orders || 0;
+    let orderChange = 0;
+    if (yestOrders === 0 && todayOrders > 0) orderChange = 100;
+    else if (yestOrders > 0) orderChange = ((todayOrders - yestOrders) / yestOrders) * 100;
 
-        let revChange = 0;
-        if (yestRev === 0 && todayRev > 0) revChange = 100;
-        else if (yestRev > 0) revChange = ((todayRev - yestRev) / yestRev) * 100;
-
-        let orderChange = 0;
-        if (yestOrders === 0 && todayOrders > 0) orderChange = 100;
-        else if (yestOrders > 0) orderChange = ((todayOrders - yestOrders) / yestOrders) * 100;
-
-        res.json({
-          success: true,
-          data: {
-            today: {
-              revenue: todayRev,
-              orders: todayOrders,
-              averageOrder: results.todayStats?.avg_order || 0,
-              revenueChange: revChange,
-              ordersChange: orderChange
-            },
-            week: results.weekStats,
-            month: results.monthStats,
-            staff: results.staffCount,
-            products: results.productStats
-          },
-          timestamp: new Date().toISOString()
-        });
-      }
+    res.json({
+      success: true,
+      data: {
+        today: {
+          revenue: todayRev,
+          orders: todayOrders,
+          averageOrder: parseFloat(todayRes.rows[0]?.avg_order) || 0,
+          revenueChange: revChange,
+          ordersChange: orderChange
+        },
+        week: weekRes.rows[0],
+        month: monthRes.rows[0],
+        staff: staffRes.rows[0],
+        products: productRes.rows[0]
+      },
+      timestamp: new Date().toISOString()
     });
-  });
+  } catch (err) {
+    console.error("Dashboard error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 /**
  * GET /api/analytics/daily-stats
- * Get daily business statistics
+ * Get daily business statistics (backward compatible format)
  */
-app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
-  const statsQuery = `
-    SELECT 
-      COALESCE(SUM(CASE WHEN date(created_at) = date('now', 'localtime') THEN total_amount ELSE 0 END), 0) as today_rev,
-      COUNT(CASE WHEN date(created_at) = date('now', 'localtime') AND status = 'completed' THEN id END) as today_orders,
-      COALESCE(SUM(CASE WHEN date(created_at) = date('now', '-1 day', 'localtime') THEN total_amount ELSE 0 END), 0) as yesterday_rev,
-      COUNT(CASE WHEN date(created_at) = date('now', '-1 day', 'localtime') AND status = 'completed' THEN id END) as yesterday_orders,
-      (SELECT COUNT(*) FROM users WHERE status = 'active') as active_staff,
-      (SELECT COUNT(*) FROM products WHERE stock > 0 AND is_active = 1) as products_in_stock
-    FROM orders
-    WHERE status = 'completed'
-  `;
+app.get('/api/analytics/daily-stats', verifyToken, async (req, res) => {
+  try {
+    // ✅ CHANGED: All SQLite date functions → PostgreSQL
+    const result = await pool.query(`
+      SELECT 
+        COALESCE(SUM(CASE WHEN DATE(created_at) = CURRENT_DATE THEN total_amount ELSE 0 END), 0) as today_rev,
+        COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE AND status = 'completed' THEN id END) as today_orders,
+        COALESCE(SUM(CASE WHEN DATE(created_at) = CURRENT_DATE - INTERVAL '1 day' THEN total_amount ELSE 0 END), 0) as yesterday_rev,
+        COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE - INTERVAL '1 day' AND status = 'completed' THEN id END) as yesterday_orders,
+        (SELECT COUNT(*) FROM users WHERE status = 'active') as active_staff,
+        (SELECT COUNT(*) FROM products WHERE stock > 0 AND is_active = 1) as products_in_stock
+      FROM orders
+      WHERE status = 'completed'
+    `);
 
-  db.get(statsQuery, [], (err, row) => {
-    if (err) {
-      console.error("Daily stats error:", err);
-      return res.status(500).json({ 
-        success: false,
-        error: err.message 
-      });
-    }
+    const row = result.rows[0];
+    const todayRev = parseFloat(row?.today_rev) || 0;
+    const yestRev = parseFloat(row?.yesterday_rev) || 0;
+    const todayOrders = parseInt(row?.today_orders) || 0;
+    const yesterdayOrders = parseInt(row?.yesterday_orders) || 0;
 
-    const todayRev = row?.today_rev || 0;
-    const yestRev = row?.yesterday_rev || 0;
-    const todayOrders = row?.today_orders || 0;
-    const yesterdayOrders = row?.yesterday_orders || 0;
-
+    // Calculate percentage changes
     let revChange = 0;
     if (yestRev === 0 && todayRev > 0) {
       revChange = 100;
@@ -2074,6 +2005,7 @@ app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
 
     const avgSpend = todayOrders > 0 ? (todayRev / todayOrders) : 0;
 
+    // Return in the format expected by frontend
     res.json([
       { 
         title: 'Daily Revenue', 
@@ -2089,7 +2021,7 @@ app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
       },
       { 
         title: 'Active Staff', 
-        value: (row?.active_staff || 0).toString(), 
+        value: (parseInt(row?.active_staff) || 0).toString(), 
         change: 'Online', 
         upbeat: true 
       },
@@ -2100,137 +2032,140 @@ app.get('/api/analytics/daily-stats', verifyToken, (req, res) => {
         upbeat: true 
       },
     ]);
-  });
+  } catch (err) {
+    console.error("Daily stats error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/analytics/top-products
  * Get top selling products
  */
-app.get('/api/analytics/top-products', verifyToken, (req, res) => {
+app.get('/api/analytics/top-products', verifyToken, async (req, res) => {
   const { limit, range } = req.query;
   const productLimit = Math.min(Number(limit) || 5, 20);
 
-  let dateFilter = "date(o.created_at) = date('now', 'localtime')";
+  // ✅ CHANGED: PostgreSQL date functions
+  let dateFilter = "DATE(o.created_at) = CURRENT_DATE";
   
   switch(range) {
     case 'yesterday':
-      dateFilter = "date(o.created_at) = date('now', '-1 day', 'localtime')";
+      dateFilter = "DATE(o.created_at) = CURRENT_DATE - INTERVAL '1 day'";
       break;
     case 'week':
-      dateFilter = "o.created_at >= date('now', '-7 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '7 days'";
       break;
     case 'month':
-      dateFilter = "o.created_at >= date('now', '-30 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '30 days'";
       break;
     case 'year':
-      dateFilter = "o.created_at >= date('now', '-365 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '365 days'";
       break;
     case 'all':
       dateFilter = "1=1";
       break;
   }
 
-  const sql = `
-    SELECT 
-      p.id,
-      p.name,
-      p.category,
-      COALESCE(SUM(oi.quantity), 0) as sales, 
-      COALESCE(SUM(oi.quantity * oi.price_at_time), 0) as revenue
-    FROM order_items oi
-    JOIN products p ON oi.product_id = p.id
-    JOIN orders o ON oi.order_id = o.id
-    WHERE ${dateFilter} AND o.status = 'completed'
-    GROUP BY p.id
-    ORDER BY sales DESC
-    LIMIT ?
-  `;
-
-  db.all(sql, [productLimit], (err, rows) => {
-    if (err) {
-      console.error("Top products error:", err);
-      return res.status(500).json({ 
-        success: false,
-        error: err.message 
-      });
-    }
+  try {
+    // ✅ CHANGED: GROUP BY must include all non-aggregated columns in PostgreSQL
+    const result = await pool.query(`
+      SELECT 
+        p.id,
+        p.name,
+        p.category,
+        COALESCE(SUM(oi.quantity), 0) as sales, 
+        COALESCE(SUM(oi.quantity * oi.price_at_time), 0) as revenue
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE ${dateFilter} AND o.status = 'completed'
+      GROUP BY p.id, p.name, p.category
+      ORDER BY sales DESC
+      LIMIT $1
+    `, [productLimit]);
     
-    res.json((rows || []).map(row => ({
+    res.json((result.rows || []).map(row => ({
       id: row.id,
       name: row.name,
       category: row.category,
-      sales: row.sales,
-      revenue: `Br ${(row.revenue || 0).toLocaleString()}`
+      sales: parseInt(row.sales),
+      revenue: `Br ${parseFloat(row.revenue || 0).toLocaleString()}`
     })));
-  });
+  } catch (err) {
+    console.error("Top products error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/analytics/revenue-trend
  * Get revenue trend for specified period
  */
-app.get('/api/analytics/revenue-trend', verifyToken, (req, res) => {
+app.get('/api/analytics/revenue-trend', verifyToken, async (req, res) => {
   const { days } = req.query;
   const numDays = Math.min(Number(days) || 7, 365);
 
-  const sql = `
-    SELECT 
-      date(created_at) as date,
-      COALESCE(SUM(total_amount), 0) as revenue,
-      COUNT(*) as orders,
-      COALESCE(AVG(total_amount), 0) as average
-    FROM orders
-    WHERE created_at >= date('now', '-${numDays} days')
-    AND status = 'completed'
-    GROUP BY date(created_at)
-    ORDER BY date ASC
-  `;
+  try {
+    // ✅ CHANGED: PostgreSQL interval syntax
+    const result = await pool.query(`
+      SELECT 
+        DATE(created_at) as date,
+        COALESCE(SUM(total_amount), 0) as revenue,
+        COUNT(*) as orders,
+        COALESCE(AVG(total_amount), 0) as average
+      FROM orders
+      WHERE created_at >= NOW() - INTERVAL '${numDays} days'
+      AND status = 'completed'
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC
+    `);
 
-  db.all(sql, [], (err, rows) => {
-    if (err) {
-      console.error("Revenue trend error:", err);
-      return res.status(500).json({ 
-        success: false,
-        error: err.message 
-      });
-    }
     res.json({
       success: true,
-      data: rows || [],
+      data: result.rows || [],
       period: `${numDays} days`
     });
-  });
+  } catch (err) {
+    console.error("Revenue trend error:", err);
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/analytics/hourly-sales
  * Get sales by hour for today
  */
-app.get('/api/analytics/hourly-sales', verifyToken, (req, res) => {
-  const sql = `
-    SELECT 
-      strftime('%H', created_at) as hour,
-      COUNT(*) as orders,
-      COALESCE(SUM(total_amount), 0) as revenue
-    FROM orders
-    WHERE date(created_at) = date('now', 'localtime')
-    AND status = 'completed'
-    GROUP BY strftime('%H', created_at)
-    ORDER BY hour ASC
-  `;
-
-  db.all(sql, [], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
+app.get('/api/analytics/hourly-sales', verifyToken, async (req, res) => {
+  try {
+    // ✅ CHANGED: EXTRACT(HOUR FROM ...) instead of strftime('%H', ...)
+    const result = await pool.query(`
+      SELECT 
+        EXTRACT(HOUR FROM created_at)::INT as hour,
+        COUNT(*) as orders,
+        COALESCE(SUM(total_amount), 0) as revenue
+      FROM orders
+      WHERE DATE(created_at) = CURRENT_DATE
+      AND status = 'completed'
+      GROUP BY EXTRACT(HOUR FROM created_at)
+      ORDER BY hour ASC
+    `);
 
     const hoursMap = {};
-    (rows || []).forEach(r => {
-      hoursMap[parseInt(r.hour)] = {
-        hour: parseInt(r.hour),
-        orders: r.orders,
-        revenue: r.revenue
+    (result.rows || []).forEach(r => {
+      hoursMap[r.hour] = {
+        hour: r.hour,
+        orders: parseInt(r.orders),
+        revenue: parseFloat(r.revenue)
       };
     });
 
@@ -2243,123 +2178,125 @@ app.get('/api/analytics/hourly-sales', verifyToken, (req, res) => {
       success: true,
       data: fullData
     });
-  });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 /**
  * GET /api/analytics/low-stock
  * Get products with low stock
  */
-app.get('/api/analytics/low-stock', verifyToken, (req, res) => {
+app.get('/api/analytics/low-stock', verifyToken, async (req, res) => {
   const threshold = Number(req.query.threshold) || 10;
 
-  db.all(
-    `SELECT id, name, price, stock, category 
-     FROM products 
-     WHERE stock <= ? AND is_active = 1 
-     ORDER BY stock ASC`,
-    [threshold],
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ 
-          success: false,
-          error: err.message 
-        });
-      }
-      res.json(rows || []);
-    }
-  );
+  try {
+    const result = await pool.query(
+      `SELECT id, name, price, stock, category 
+       FROM products 
+       WHERE stock <= $1 AND is_active = 1 
+       ORDER BY stock ASC`,
+      [threshold]
+    );
+    res.json(result.rows || []);
+  } catch (err) {
+    return res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
 /**
  * GET /api/analytics/staff-performance
  * Get staff performance metrics
  */
-app.get('/api/analytics/staff-performance', verifyToken, requireAdmin, (req, res) => {
+app.get('/api/analytics/staff-performance', verifyToken, requireAdmin, async (req, res) => {
   const { range } = req.query;
   
-  let dateFilter = "date(o.created_at) = date('now', 'localtime')";
+  // ✅ CHANGED: PostgreSQL date functions
+  let dateFilter = "DATE(o.created_at) = CURRENT_DATE";
   
   switch(range) {
     case 'week':
-      dateFilter = "o.created_at >= date('now', '-7 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '7 days'";
       break;
     case 'month':
-      dateFilter = "o.created_at >= date('now', '-30 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '30 days'";
       break;
     case 'all':
       dateFilter = "1=1";
       break;
   }
 
-  const sql = `
-    SELECT 
-      u.id,
-      u.name,
-      u.email,
-      COUNT(o.id) as total_orders,
-      COALESCE(SUM(o.total_amount), 0) as total_revenue,
-      COALESCE(AVG(o.total_amount), 0) as average_order,
-      MAX(o.created_at) as last_sale
-    FROM users u
-    LEFT JOIN orders o ON u.id = o.staff_id AND o.status = 'completed' AND ${dateFilter}
-    WHERE u.status = 'active'
-    GROUP BY u.id
-    ORDER BY total_revenue DESC
-  `;
+  try {
+    // ✅ CHANGED: GROUP BY must include all non-aggregated columns
+    const result = await pool.query(`
+      SELECT 
+        u.id,
+        u.name,
+        u.email,
+        COUNT(o.id) as total_orders,
+        COALESCE(SUM(o.total_amount), 0) as total_revenue,
+        COALESCE(AVG(o.total_amount), 0) as average_order,
+        MAX(o.created_at) as last_sale
+      FROM users u
+      LEFT JOIN orders o ON u.id = o.staff_id AND o.status = 'completed' AND ${dateFilter}
+      WHERE u.status = 'active'
+      GROUP BY u.id, u.name, u.email
+      ORDER BY total_revenue DESC
+    `);
 
-  db.all(sql, [], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
     res.json({
       success: true,
-      data: rows || []
+      data: result.rows || []
     });
-  });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 /**
  * GET /api/analytics/category-breakdown
  * Get sales breakdown by category
  */
-app.get('/api/analytics/category-breakdown', verifyToken, (req, res) => {
+app.get('/api/analytics/category-breakdown', verifyToken, async (req, res) => {
   const { range } = req.query;
   
-  let dateFilter = "date(o.created_at) = date('now', 'localtime')";
+  // ✅ CHANGED: PostgreSQL date functions
+  let dateFilter = "DATE(o.created_at) = CURRENT_DATE";
   
   switch(range) {
     case 'week':
-      dateFilter = "o.created_at >= date('now', '-7 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '7 days'";
       break;
     case 'month':
-      dateFilter = "o.created_at >= date('now', '-30 days')";
+      dateFilter = "o.created_at >= NOW() - INTERVAL '30 days'";
       break;
   }
 
-  const sql = `
-    SELECT 
-      p.category,
-      COUNT(DISTINCT o.id) as orders,
-      COALESCE(SUM(oi.quantity), 0) as items_sold,
-      COALESCE(SUM(oi.quantity * oi.price_at_time), 0) as revenue
-    FROM order_items oi
-    JOIN products p ON oi.product_id = p.id
-    JOIN orders o ON oi.order_id = o.id
-    WHERE ${dateFilter} AND o.status = 'completed'
-    GROUP BY p.category
-    ORDER BY revenue DESC
-  `;
+  try {
+    const result = await pool.query(`
+      SELECT 
+        p.category,
+        COUNT(DISTINCT o.id) as orders,
+        COALESCE(SUM(oi.quantity), 0) as items_sold,
+        COALESCE(SUM(oi.quantity * oi.price_at_time), 0) as revenue
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE ${dateFilter} AND o.status = 'completed'
+      GROUP BY p.category
+      ORDER BY revenue DESC
+    `);
 
-  db.all(sql, [], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
     res.json({
       success: true,
-      data: rows || []
+      data: result.rows || []
     });
-  });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -2370,12 +2307,13 @@ app.get('/api/analytics/category-breakdown', verifyToken, (req, res) => {
  * GET /api/logs
  * Get activity logs (Admin/Owner only)
  */
-app.get('/api/logs', verifyToken, requireAdmin, (req, res) => {
+app.get('/api/logs', verifyToken, requireAdmin, async (req, res) => {
   const { limit, page, user_id, action } = req.query;
   const recordLimit = Math.min(Number(limit) || 50, 200);
   const pageNum = Number(page) || 1;
   const offset = (pageNum - 1) * recordLimit;
 
+  // ✅ CHANGED: Dynamic parameterized query for PostgreSQL
   let sql = `
     SELECT al.*, u.name as user_name, u.email as user_email
     FROM activity_logs al
@@ -2383,29 +2321,37 @@ app.get('/api/logs', verifyToken, requireAdmin, (req, res) => {
     WHERE 1=1
   `;
   const params = [];
+  let paramIndex = 0;
 
   if (user_id) {
-    sql += " AND al.user_id = ?";
+    paramIndex++;
+    sql += ` AND al.user_id = $${paramIndex}`;
     params.push(user_id);
   }
 
   if (action) {
-    sql += " AND al.action = ?";
+    paramIndex++;
+    sql += ` AND al.action = $${paramIndex}`;
     params.push(action);
   }
 
-  sql += ` ORDER BY al.created_at DESC LIMIT ? OFFSET ?`;
-  params.push(recordLimit, offset);
+  paramIndex++;
+  sql += ` ORDER BY al.created_at DESC LIMIT $${paramIndex}`;
+  params.push(recordLimit);
 
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
+  paramIndex++;
+  sql += ` OFFSET $${paramIndex}`;
+  params.push(offset);
+
+  try {
+    const result = await pool.query(sql, params);
     res.json({
       success: true,
-      data: rows || []
+      data: result.rows || []
     });
-  });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -2416,85 +2362,78 @@ app.get('/api/logs', verifyToken, requireAdmin, (req, res) => {
  * GET /api/categories
  * Get all categories
  */
-app.get('/api/categories', verifyToken, (req, res) => {
-  db.all(
-    "SELECT * FROM categories ORDER BY name ASC",
-    [],
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ success: false, error: err.message });
-      }
-      res.json(rows || []);
-    }
-  );
+app.get('/api/categories', verifyToken, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM categories ORDER BY name ASC");
+    res.json(result.rows || []);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 /**
  * POST /api/categories
  * Add new category (Admin/Owner only)
  */
-app.post('/api/categories', verifyToken, requireAdmin, (req, res) => {
+app.post('/api/categories', verifyToken, requireAdmin, async (req, res) => {
   const { name, description } = req.body;
 
   if (!name || name.trim() === '') {
     return res.status(400).json({ success: false, error: 'Category name is required' });
   }
 
-  db.run(
-    "INSERT INTO categories (name, description) VALUES (?, ?)",
-    [name.trim(), description || null],
-    function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE constraint')) {
-          return res.status(400).json({ success: false, error: 'Category already exists' });
-        }
-        return res.status(500).json({ success: false, error: err.message });
+  try {
+    // ✅ CHANGED: RETURNING id
+    const result = await pool.query(
+      "INSERT INTO categories (name, description) VALUES ($1, $2) RETURNING id",
+      [name.trim(), description || null]
+    );
+
+    res.status(201).json({
+      success: true,
+      category: {
+        id: result.rows[0].id,
+        name: name.trim(),
+        description
       }
-      res.status(201).json({
-        success: true,
-        category: {
-          id: this.lastID,
-          name: name.trim(),
-          description
-        }
-      });
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ success: false, error: 'Category already exists' });
     }
-  );
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 /**
  * DELETE /api/categories/:id
  * Delete category (Admin/Owner only)
  */
-app.delete('/api/categories/:id', verifyToken, requireAdmin, (req, res) => {
+app.delete('/api/categories/:id', verifyToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
 
-  db.get(
-    "SELECT COUNT(*) as count FROM products WHERE category = (SELECT name FROM categories WHERE id = ?)",
-    [id],
-    (checkErr, row) => {
-      if (checkErr) {
-        return res.status(500).json({ success: false, error: checkErr.message });
-      }
+  try {
+    // Check if category is in use
+    const checkResult = await pool.query(
+      "SELECT COUNT(*) as count FROM products WHERE category = (SELECT name FROM categories WHERE id = $1)",
+      [id]
+    );
 
-      if (row.count > 0) {
-        return res.status(400).json({
-          success: false,
-          error: `Cannot delete category. ${row.count} products are using it.`
-        });
-      }
-
-      db.run("DELETE FROM categories WHERE id = ?", [id], function(err) {
-        if (err) {
-          return res.status(500).json({ success: false, error: err.message });
-        }
-        if (this.changes === 0) {
-          return res.status(404).json({ success: false, error: 'Category not found' });
-        }
-        res.json({ success: true, message: 'Category deleted' });
+    if (parseInt(checkResult.rows[0].count) > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot delete category. ${checkResult.rows[0].count} products are using it.`
       });
     }
-  );
+
+    const result = await pool.query("DELETE FROM categories WHERE id = $1", [id]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Category not found' });
+    }
+    res.json({ success: true, message: 'Category deleted' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -2517,6 +2456,7 @@ app.use((err, req, res, next) => {
   console.error('🔥 Server Error:', err);
   console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
+  // Don't leak error details in production
   const message = NODE_ENV === 'production' 
     ? 'Internal server error' 
     : err.message;
@@ -2535,17 +2475,19 @@ app.use((err, req, res, next) => {
 const shutdown = (signal) => {
   console.log(`\n📛 Received ${signal}. Shutting down gracefully...`);
   
-  db.close((err) => {
-    if (err) {
-      console.error('❌ Error closing database:', err);
-    } else {
-      console.log('✅ Database connection closed');
-    }
-    
-    console.log('👋 Server shut down complete');
-    process.exit(err ? 1 : 0);
-  });
+  // ✅ CHANGED: pool.end() instead of db.close()
+  pool.end()
+    .then(() => {
+      console.log('✅ Database pool closed');
+      console.log('👋 Server shut down complete');
+      process.exit(0);
+    })
+    .catch(err => {
+      console.error('❌ Error closing database pool:', err);
+      process.exit(1);
+    });
 
+  // Force exit after 10 seconds
   setTimeout(() => {
     console.error('⚠️  Forced shutdown after timeout');
     process.exit(1);
@@ -2555,6 +2497,7 @@ const shutdown = (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('💀 Uncaught Exception:', err);
   shutdown('uncaughtException');
@@ -2567,6 +2510,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // ═══════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════
+
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -2580,11 +2524,11 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
-  console.log(`   🚀 EthioPOS Server v2.1.0`);
+  console.log(`   🚀 EthioPOS Server v3.0.0`);
   console.log(`   📡 URL: http://0.0.0.0:${PORT}`);
   console.log(`   🌍 Environment: ${NODE_ENV}`);
   console.log(`   🔒 Security: Helmet + Rate Limiting + JWT Auth`);
-  console.log(`   📦 Database: SQLite (WAL mode)`);
+  console.log(`   📦 Database: PostgreSQL (Neon.tech)`);
   console.log(`   ⏰ Started: ${new Date().toLocaleString()}`);
   console.log('');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -2601,3 +2545,5 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
 });
+
+module.exports = app;
